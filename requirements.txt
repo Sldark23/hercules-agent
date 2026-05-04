@@ -1,3 +1,26 @@
 # Hercules Agent Framework
-# This framework uses only Python standard library modules
-# No external dependencies required
+# Multi-platform AI Agent with LLM abstraction, skill system, and MCP support
+
+# Core
+aiohttp>=3.9.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+
+# LLM Providers (via litellm - supports 100+ providers)
+litellm>=1.40.0
+
+# Messaging Platforms
+python-telegram-bot>=20.0
+discord.py>=2.3.0
+slack-sdk>=3.21.0
+whatsapp-web.py>=0.1.7
+
+# MCP (Model Context Protocol)
+mcp>=1.0.0
+
+# Database
+aiosqlite>=0.19.0
+
+# Utilities
+httpx>=0.25.0
+sqlalchemy>=2.0.0
