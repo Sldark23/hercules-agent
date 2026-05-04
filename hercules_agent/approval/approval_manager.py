@@ -1,430 +1,397 @@
-# Approval Manager module for Hercules Agent
-# Approve/deny dangerous commands
+# Approval Manager for Hercules Agent
+# Approve/deny dangerous commands with configurable rules
 
 from dataclasses import dataclass, field
-from typing import Dict, Any, List, Optional, Callable, Union
+from typing import Dict, Any, List, Optional, Callable, Set
 from enum import Enum
+import asyncio
 import logging
 import re
-import fnmatch
 from datetime import datetime, timedelta
-import uuid
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
 
-class ApprovalAction(Enum):
-    """Approval actions"""
-    APPROVE = "approve"
-    DENY = "deny"
-    ASK = "ask"  # Ask user for approval
+class ApprovalLevel(Enum):
+    """Approval levels"""
+    NONE = "none"           # No approval needed
+    AUTO = "auto"           # Auto-approved
+    LOW = "low"             # Fast approval (e.g., email/chat)
+    MEDIUM = "medium"       # Standard approval (e.g., Discord)
+    HIGH = "high"           # Strict approval (e.g., 2FA)
+    CRITICAL = "critical"   # Maximum security (e.g., manual review)
 
 
 class ApprovalStatus(Enum):
-    """Request status"""
+    """Approval request status"""
     PENDING = "pending"
     APPROVED = "approved"
     DENIED = "denied"
     EXPIRED = "expired"
-    BYPASSED = "bypassed"
-
-
-class RiskLevel(Enum):
-    """Risk levels"""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    CANCELLED = "cancelled"
 
 
 @dataclass
 class ApprovalRule:
-    """Rule for auto-approving or denying"""
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    name: str = ""
-    pattern: str = ""  # Glob pattern to match
-    regex: str = ""    # Regex pattern (alternative)
-    action: ApprovalAction = ApprovalAction.ASK
-    risk_level: RiskLevel = RiskLevel.MEDIUM
-    description: str = ""
-    enabled: bool = True
-    timeout: int = 300  # seconds to respond
+    """Approval rule"""
+    name: str
+    pattern: str           # Regex pattern
+    level: ApprovalLevel
     
     # Conditions
-    allowed_users: List[str] = field(default_factory=list)  # User IDs
-    allowed_tools: List[str] = field(default_factory=list)  # Tool names
-    rate_limit: int = 0  # Max requests per minute
+    requires_role: List[str] = field(default_factory=list)
+    requires_permission: List[str] = field(default_factory=list)
+    
+    # Behavior
+    description: str = ""
+    timeout: int = 300      # Approval timeout in seconds
+    allow_remember: bool = True
+    
+    # Metadata
+    enabled: bool = True
+    priority: int = 0
 
 
 @dataclass
 class ApprovalRequest:
     """Approval request"""
-    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
-    requester: str = ""  # User ID or system
-    command: str = ""
-    tool: str = ""
-    args: Dict[str, Any] = field(default_factory=dict)
-    risk_level: RiskLevel = RiskLevel.MEDIUM
-    rule_id: str = ""
+    id: str
+    requester: str          # User ID
+    command: str            # The command being approved
+    args: Dict[str, Any]    # Command arguments
     
+    # Approval tracking
+    level: ApprovalLevel
     status: ApprovalStatus = ApprovalStatus.PENDING
-    action: ApprovalAction = ApprovalAction.ASK
     
-    timestamp: datetime = field(default_factory=datetime.now)
-    expires_at: Optional[datetime] = None
-    responded_at: Optional[datetime] = None
-    responder: str = ""
+    # Timing
+    created_at: datetime = field(default_factory=datetime.now)
+    expires_at: datetime = None
+    resolved_at: datetime = None
+    resolver: str = ""
     
-    # Response
-    reason: str = ""
-    output: str = ""
+    # Details
+    risk_level: str = "low"
+    description: str = ""
+    context: Dict[str, Any] = field(default_factory=dict)
+    
+    # History
+    history: List[Dict] = field(default_factory=list)
 
 
 @dataclass
 class ApprovalConfig:
-    """Approval configuration"""
-    enabled: bool = True
-    default_action: ApprovalAction = ApprovalAction.ASK
-    default_timeout: int = 300  # seconds
-    auto_approve_tools: List[str] = field(default_factory=list)  # Tools that auto-approve
-    auto_deny_tools: List[str] = field(default_factory=list)   # Tools that auto-deny
-    bypass_users: List[str] = field(default_factory=list)     # Users that bypass approval
-    max_pending: int = 10  # Max pending requests
+    """Approval system configuration"""
+    # Default level
+    default_level: ApprovalLevel = ApprovalLevel.LOW
+    
+    # Timeout
+    default_timeout: int = 300
+    
+    # Providers
+    require_all_providers: bool = False
+    
+    # Auto-approve settings
+    auto_approve_roles: List[str] = field(default_factory=list)
+    auto_approve_ips: List[str] = field(default_factory=list)
+    
+    # Remember approvals
+    remember_duration: int = 3600    # Remember for 1 hour
+    
+    # Notifications
+    notify_on_deny: bool = True
+    notify_channels: List[str] = field(default_factory=list)
 
 
-# ==================== Risk Analyzer ====================
+# ==================== Approval Manager ====================
 
-class RiskAnalyzer:
-    """Analyze command risk level"""
+class ApprovalManager:
+    """Manage command approvals"""
     
-    # Dangerous patterns
-    CRITICAL_PATTERNS = [
-        r"rm\s+-rf",
-        r"drop\s+table",
-        r"delete\s+.*database",
-        r"format\s+disk",
-        r">\s*/dev/sd",
-        r"chmod\s+777",
-        r"chown\s+-R",
-    ]
-    
-    HIGH_PATTERNS = [
-        r"sudo\s+",
-        r"rm\s+",
-        r"mv\s+.*\s+/",
-        r"cp\s+.*\s+-r",
-        r"kill\s+-9",
-        r"shutdown",
-        r"reboot",
-        r"systemctl\s+stop",
-        r"docker\s+rm\s+-f",
-        r"curl.*\|\s*sh",
-        r"wget.*\|\s*sh",
-        r"eval\s+",
-        r"exec\s+",
-        r"\.\s*\.\/",
-    ]
-    
-    MEDIUM_PATTERNS = [
-        r"apt\s+install",
-        r"pip\s+install",
-        r"npm\s+install\s+-g",
-        r"git\s+push",
-        r"git\s+force",
-        r"chmod\s+",
-        r"touch\s+",
-        r"mkdir\s+",
-    ]
-    
-    def __init__(self):
-        self._compile_patterns()
-    
-    def _compile_patterns(self):
-        """Compile regex patterns"""
-        self._critical = [re.compile(p, re.I) for p in self.CRITICAL_PATTERNS]
-        self._high = [re.compile(p, re.I) for p in self.HIGH_PATTERNS]
-        self._medium = [re.compile(p, re.I) for p in self.MEDIUM_PATTERNS]
-    
-    def analyze(self, command: str, tool: str = "") -> RiskLevel:
-        """Analyze command risk"""
-        if tool in ("read_file", "search_files", "session_search"):
-            return RiskLevel.LOW
-        
-        if tool in ("terminal", "execute_code"):
-            # Check patterns
-            for pattern in self._critical:
-                if pattern.search(command):
-                    return RiskLevel.CRITICAL
-            
-            for pattern in self._high:
-                if pattern.search(command):
-                    return RiskLevel.HIGH
-            
-            for pattern in self._medium:
-                if pattern.search(command):
-                    return RiskLevel.MEDIUM
-        
-        return RiskLevel.MEDIUM
-    
-    def is_dangerous(self, command: str) -> bool:
-        """Check if command is dangerous"""
-        return self.analyze(command) in (RiskLevel.HIGH, RiskLevel.CRITICAL)
-
-
-# ==================== Approval Handler ====================
-
-class ApprovalHandler:
-    """Handles approval requests"""
-    
-    def __init__(
-        self,
-        config: ApprovalConfig = None,
-        notify_callback: Callable[[ApprovalRequest], None] = None,
-        approve_callback: Callable[[str, bool, str], None] = None
-    ):
+    def __init__(self, config: ApprovalConfig = None):
         self.config = config or ApprovalConfig()
-        self.notify_callback = notify_callback
-        self.approve_callback = approve_callback
         
-        self._requests: Dict[str, ApprovalRequest] = {}
+        # Rules
         self._rules: Dict[str, ApprovalRule] = {}
-        self._rate_limiter: Dict[str, List[datetime]] = {}
         
-        self._analyzer = RiskAnalyzer()
+        # Requests
+        self._requests: Dict[str, ApprovalRequest] = {}
         
-        # Default rules
-        self._add_default_rules()
+        # Cache
+        self._remembered: Dict[str, datetime] = {}  # command_hash -> approved_at
+        
+        # Callbacks
+        self.on_approval_request: Callable = None
+        self.on_approved: Callable = None
+        self.on_denied: Callable = None
+        
+        # Register built-in rules
+        self._register_default_rules()
     
-    def _add_default_rules(self):
-        """Add default approval rules"""
-        # Auto-approve read-only operations
-        self.add_rule(ApprovalRule(
-            name="Read-only operations",
-            pattern="*",
-            allowed_tools=["read_file", "search_files", "session_search", "web_search", "web_extract"],
-            action=ApprovalAction.APPROVE,
-            risk_level=RiskLevel.LOW,
-            description="Auto-approve read operations"
-        ))
+    def _register_default_rules(self):
+        """Register default approval rules"""
+        # Critical commands - always require approval
+        critical_commands = [
+            (r"^rm\s+-rf\s+/", "Delete root directory", ApprovalLevel.CRITICAL),
+            (r"^rm\s+-rf\s+/", "Delete system directory", ApprovalLevel.CRITICAL),
+            (r"^dd\s+.*of=/", "Write to device", ApprovalLevel.CRITICAL),
+            (r"^shutdown", "Shutdown system", ApprovalLevel.CRITICAL),
+            (r"^reboot", "Reboot system", ApprovalLevel.CRITICAL),
+            (r"^mkfs", "Format filesystem", ApprovalLevel.CRITICAL),
+        ]
         
-        # Auto-deny dangerous terminal commands
-        self.add_rule(ApprovalRule(
-            name="Destructive commands",
-            pattern="*",
-            allowed_tools=["terminal"],
-            action=ApprovalAction.DENY,
-            risk_level=RiskLevel.CRITICAL,
-            description="Deny destructive terminal commands"
-        ))
+        for pattern, desc, level in critical_commands:
+            self.add_rule(ApprovalRule(
+                name=f"critical_{len(self._rules)}",
+                pattern=pattern,
+                level=level,
+                description=desc,
+                priority=100
+            ))
+        
+        # High risk commands
+        high_commands = [
+            (r"^rm\s+", "Delete files", ApprovalLevel.HIGH),
+            (r"^chmod\s+777", "World-writable permissions", ApprovalLevel.HIGH),
+            (r"^chown\s+-R", "Recursive ownership change", ApprovalLevel.HIGH),
+            (r"^kill\s+-9", "Force kill process", ApprovalLevel.HIGH),
+            (r"^systemctl\s+stop", "Stop system service", ApprovalLevel.HIGH),
+        ]
+        
+        for pattern, desc, level in high_commands:
+            self.add_rule(ApprovalRule(
+                name=f"high_{len(self._rules)}",
+                pattern=pattern,
+                level=level,
+                description=desc,
+                priority=50
+            ))
+        
+        # Medium risk
+        medium_commands = [
+            (r"^pip\s+install", "Install Python package", ApprovalLevel.MEDIUM),
+            (r"^npm\s+install\s+-g", "Install global npm package", ApprovalLevel.MEDIUM),
+            (r"^apt\s+install", "Install system package", ApprovalLevel.MEDIUM),
+            (r"^docker\s+run", "Run Docker container", ApprovalLevel.MEDIUM),
+            (r"^curl.*\|", "Pipe to shell", ApprovalLevel.MEDIUM),
+        ]
+        
+        for pattern, desc, level in medium_commands:
+            self.add_rule(ApprovalRule(
+                name=f"medium_{len(self._rules)}",
+                pattern=pattern,
+                level=level,
+                description=desc,
+                priority=10
+            ))
+    
+    def _generate_command_hash(self, command: str, args: Dict) -> str:
+        """Generate hash for command"""
+        import hashlib
+        data = f"{command}:{json.dumps(args, sort_keys=True)}"
+        return hashlib.sha256(data.encode()).hexdigest()[:16]
     
     def add_rule(self, rule: ApprovalRule):
         """Add approval rule"""
-        self._rules[rule.id] = rule
-        logger.info(f"Added approval rule: {rule.name}")
+        self._rules[rule.name] = rule
+        logger.info(f"Added approval rule: {rule.name} ({rule.level.value})")
     
-    def remove_rule(self, rule_id: str) -> bool:
+    def remove_rule(self, name: str) -> bool:
         """Remove rule"""
-        if rule_id in self._rules:
-            del self._rules[rule_id]
+        if name in self._rules:
+            del self._rules[name]
             return True
         return False
     
-    def _match_rule(self, request: ApprovalRequest) -> Optional[ApprovalRule]:
-        """Match request to rule"""
-        for rule in self._rules.values():
+    def get_rule(self, name: str) -> Optional[ApprovalRule]:
+        """Get rule"""
+        return self._rules.get(name)
+    
+    def list_rules(self, enabled_only: bool = True) -> List[Dict]:
+        """List all rules"""
+        rules = list(self._rules.values())
+        
+        if enabled_only:
+            rules = [r for r in rules if r.enabled]
+        
+        # Sort by priority
+        rules.sort(key=lambda r: -r.priority)
+        
+        return [
+            {
+                "name": r.name,
+                "pattern": r.pattern,
+                "level": r.level.value,
+                "description": r.description,
+                "enabled": r.enabled,
+                "priority": r.priority
+            }
+            for r in rules
+        ]
+    
+    def check_approval(
+        self,
+        command: str,
+        args: Dict = None,
+        user_id: str = "",
+        roles: List[str] = None,
+        ip: str = ""
+    ) -> ApprovalLevel:
+        """Check what approval level is needed"""
+        args = args or {}
+        
+        # Check auto-approve
+        if user_id in self.config.auto_approve_roles:  # Actually should check roles
+            return ApprovalLevel.NONE
+        
+        if ip in self.config.auto_approve_ips:
+            return ApprovalLevel.NONE
+        
+        # Check remembered approvals
+        cmd_hash = self._generate_command_hash(command, args)
+        
+        if cmd_hash in self._remembered:
+            approved_at = self._remembered[cmd_hash]
+            
+            if datetime.now() - approved_at < timedelta(seconds=self.config.remember_duration):
+                return ApprovalLevel.NONE
+        
+        # Check rules
+        for rule in sorted(self._rules.values(), key=lambda r: -r.priority):
             if not rule.enabled:
                 continue
             
-            # Check tool
-            if rule.allowed_tools and request.tool not in rule.allowed_tools:
-                continue
-            
-            # Check pattern
-            if rule.pattern:
-                if not fnmatch.fnmatch(request.command, rule.pattern):
-                    continue
-            
-            if rule.regex:
-                if not re.search(rule.regex, request.command):
-                    continue
-            
-            # Check user
-            if rule.allowed_users and request.requester not in rule.allowed_users:
-                continue
-            
-            return rule
+            if re.search(rule.pattern, command, re.IGNORECASE):
+                return rule.level
         
-        return None
+        return self.config.default_level
     
-    def _check_rate_limit(self, requester: str) -> bool:
-        """Check rate limit"""
-        now = datetime.now()
-        minute_ago = now - timedelta(minutes=1)
-        
-        if requester not in self._rate_limiter:
-            self._rate_limiter[requester] = []
-        
-        # Clean old entries
-        self._rate_limiter[requester] = [
-            t for t in self._rate_limiter[requester]
-            if t > minute_ago
-        ]
-        
-        # Check limit (use rule limit or default)
-        return len(self._rate_limiter[requester]) < 10
-    
-    async def request(
+    async def request_approval(
         self,
         command: str,
-        tool: str,
-        args: Dict[str, Any] = None,
-        requester: str = "system"
+        args: Dict = None,
+        requester: str = "",
+        roles: List[str] = None,
+        **context
     ) -> ApprovalRequest:
-        """Create approval request"""
-        # Check if bypassed
-        if requester in self.config.bypass_users:
-            request = ApprovalRequest(
-                requester=requester,
-                command=command,
-                tool=tool,
-                args=args or {},
-                risk_level=RiskLevel.LOW,
-                status=ApprovalStatus.BYPASSED,
-                action=ApprovalAction.APPROVE,
-            )
-            return request
+        """Request approval for command"""
+        args = args or {}
+        roles = roles or []
         
-        # Check rate limit
-        if not self._check_rate_limit(requester):
-            raise RuntimeError("Rate limit exceeded")
+        level = self.check_approval(command, args, requester, roles)
         
-        # Check tool whitelist/blacklist
-        if tool in self.config.auto_approve_tools:
-            action = ApprovalAction.APPROVE
-            status = ApprovalStatus.APPROVED
-        elif tool in self.config.auto_deny_tools:
-            action = ApprovalAction.DENY
-            status = ApprovalStatus.DENIED
-        else:
-            # Analyze risk
-            risk = self._analyzer.analyze(command, tool)
-            
-            # Match rule
-            request = ApprovalRequest(
-                requester=requester,
-                command=command,
-                tool=tool,
-                args=args or {},
-                risk_level=risk,
-            )
-            
-            rule = self._match_rule(request)
-            if rule:
-                request.rule_id = rule.id
-                request.action = rule.action
-                action = rule.action
-            else:
-                action = self.config.default_action
-            
-            # Determine status
-            if action == ApprovalAction.APPROVE:
-                status = ApprovalStatus.APPROVED
-            elif action == ApprovalAction.DENY:
-                status = ApprovalStatus.DENIED
-            else:
-                status = ApprovalStatus.PENDING
+        # Auto-approve if none needed
+        if level == ApprovalLevel.NONE:
+            return None
         
-        request.status = status
-        request.action = action
+        # Create request
+        request = ApprovalRequest(
+            id=str(uuid4())[:8],
+            requester=requester,
+            command=command,
+            args=args,
+            level=level,
+            expires_at=datetime.now() + timedelta(seconds=self.config.default_timeout),
+            context=context
+        )
         
-        # Set expiration
-        timeout = getattr(request, 'timeout', None) or self.config.default_timeout
-        request.expires_at = datetime.now() + timedelta(seconds=timeout)
-        
-        # Store request
+        # Add to tracking
         self._requests[request.id] = request
         
-        # Notify if pending
-        if status == ApprovalStatus.PENDING:
-            if self.notify_callback:
-                self.notify_callback(request)
+        # Trigger callback
+        if self.on_approval_request:
+            await self.on_approval_request(request)
         
-        # Cleanup old requests
-        self._cleanup_old_requests()
+        logger.info(f"Approval requested: {request.id} - {command} ({level.value})")
         
-        logger.info(f"Approval request: {request.id} - {status.value}")
         return request
     
     async def approve(
         self,
         request_id: str,
-        responder: str = "user",
+        resolver: str = "",
         reason: str = ""
     ) -> bool:
         """Approve a request"""
         request = self._requests.get(request_id)
+        
         if not request:
+            logger.warning(f"Approval request not found: {request_id}")
             return False
         
+        if request.status != ApprovalStatus.PENDING:
+            logger.warning(f"Request already resolved: {request_id}")
+            return False
+        
+        # Update request
         request.status = ApprovalStatus.APPROVED
-        request.action = ApprovalAction.APPROVE
-        request.responder = responder
-        request.reason = reason
-        request.responded_at = datetime.now()
+        request.resolved_at = datetime.now()
+        request.resolver = resolver
         
-        if self.approve_callback:
-            self.approve_callback(request_id, True, reason)
+        request.history.append({
+            "action": "approved",
+            "by": resolver,
+            "reason": reason,
+            "at": datetime.now().isoformat()
+        })
         
-        logger.info(f"Approved: {request_id}")
+        # Remember for future
+        if request.level != ApprovalLevel.CRITICAL:
+            cmd_hash = self._generate_command_hash(request.command, request.args)
+            self._remembered[cmd_hash] = datetime.now()
+        
+        # Callback
+        if self.on_approved:
+            await self.on_approved(request)
+        
+        logger.info(f"Approved: {request_id} by {resolver}")
+        
         return True
     
     async def deny(
         self,
         request_id: str,
-        responder: str = "user",
+        resolver: str = "",
         reason: str = ""
     ) -> bool:
         """Deny a request"""
         request = self._requests.get(request_id)
+        
         if not request:
             return False
         
+        if request.status != ApprovalStatus.PENDING:
+            return False
+        
         request.status = ApprovalStatus.DENIED
-        request.action = ApprovalAction.DENY
-        request.responder = responder
-        request.reason = reason
-        request.responded_at = datetime.now()
+        request.resolved_at = datetime.now()
+        request.resolver = resolver
         
-        if self.approve_callback:
-            self.approve_callback(request_id, False, reason)
+        request.history.append({
+            "action": "denied",
+            "by": resolver,
+            "reason": reason,
+            "at": datetime.now().isoformat()
+        })
         
-        logger.info(f"Denied: {request_id}")
+        if self.on_denied:
+            await self.on_denied(request)
+        
+        logger.info(f"Denied: {request_id} by {resolver} - {reason}")
+        
         return True
     
     def get_request(self, request_id: str) -> Optional[ApprovalRequest]:
-        """Get request"""
+        """Get approval request"""
         return self._requests.get(request_id)
-    
-    def get_pending(self) -> List[ApprovalRequest]:
-        """Get pending requests"""
-        now = datetime.now()
-        pending = [
-            r for r in self._requests.values()
-            if r.status == ApprovalStatus.PENDING
-        ]
-        
-        # Check expiration
-        for request in pending:
-            if request.expires_at and now > request.expires_at:
-                request.status = ApprovalStatus.EXPIRED
-        
-        return [r for r in pending if r.status == ApprovalStatus.PENDING]
     
     def list_requests(
         self,
         status: ApprovalStatus = None,
-        requester: str = None
-    ) -> List[Dict[str, Any]]:
+        requester: str = None,
+        limit: int = 50
+    ) -> List[Dict]:
         """List requests"""
         requests = list(self._requests.values())
         
@@ -434,88 +401,185 @@ class ApprovalHandler:
         if requester:
             requests = [r for r in requests if r.requester == requester]
         
+        # Sort by created
+        requests.sort(key=lambda r: -r.created_at.timestamp())
+        
         return [
             {
                 "id": r.id,
-                "requester": r.requester,
-                "command": r.command[:100],
-                "tool": r.tool,
-                "risk_level": r.risk_level.value,
+                "command": r.command,
+                "level": r.level.value,
                 "status": r.status.value,
-                "action": r.action.value,
-                "timestamp": r.timestamp.isoformat(),
+                "requester": r.requester,
+                "created_at": r.created_at.isoformat(),
             }
-            for r in requests
+            for r in requests[:limit]
         ]
     
-    def _cleanup_old_requests(self):
-        """Clean up old requests"""
+    def cleanup_expired(self):
+        """Clean up expired requests"""
         now = datetime.now()
-        to_remove = []
+        
+        expired = []
         
         for req in self._requests.values():
-            if req.status in (ApprovalStatus.APPROVED, ApprovalStatus.DENIED):
-                # Keep for 1 hour
-                if req.responded_at and (now - req.responded_at).total_seconds() > 3600:
-                    to_remove.append(req.id)
+            if req.status == ApprovalStatus.PENDING and req.expires_at < now:
+                req.status = ApprovalStatus.EXPIRED
+                expired.append(req.id)
         
-        for req_id in to_remove:
-            del self._requests[req_id]
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get approval stats"""
-        return {
-            "pending": len(self.get_pending()),
-            "total": len(self._requests),
-            "approved": len([r for r in self._requests.values() if r.status == ApprovalStatus.APPROVED]),
-            "denied": len([r for r in self._requests.values() if r.status == ApprovalStatus.DENIED]),
-            "rules": len(self._rules),
-        }
+        # Also clean old remembered approvals
+        remember_timeout = timedelta(seconds=self.config.remember_duration)
+        
+        remembered_to_remove = []
+        
+        for cmd_hash, approved_at in self._remembered.items():
+            if now - approved_at > remember_timeout:
+                remembered_to_remove.append(cmd_hash)
+        
+        for cmd_hash in remembered_to_remove:
+            del self._remembered[cmd_hash]
+        
+        if expired or remembered_to_remove:
+            logger.info(f"Cleaned up {len(expired)} expired requests, {len(remembered_to_remove)} remembered")
 
 
-# ==================== Middleware Integration ====================
+# ==================== Approval Middleware ====================
 
 class ApprovalMiddleware:
-    """Middleware to intercept and approve/deny commands"""
+    """Middleware for checking approvals before execution"""
     
-    def __init__(self, handler: ApprovalHandler):
-        self.handler = handler
+    def __init__(self, manager: ApprovalManager):
+        self.manager = manager
     
-    async def intercept(
+    async def check(
         self,
-        tool: str,
-        args: Dict[str, Any],
-        command: str = None,
-        requester: str = "system"
-    ) -> bool:
-        """Intercept and check command"""
-        if not self.handler.config.enabled:
-            return True
+        command: str,
+        args: Dict = None,
+        **context
+    ) -> tuple[bool, Optional[ApprovalRequest]]:
+        """Check if approval is needed"""
+        level = self.manager.check_approval(command, args, **context)
         
-        if not command:
-            command = str(args)
+        if level == ApprovalLevel.NONE:
+            return True, None
         
-        request = await self.handler.request(
+        # Request approval
+        request = await self.manager.request_approval(
             command=command,
-            tool=tool,
-            args=args,
-            requester=requester
+            args=args or {},
+            **context
         )
         
-        # If approved or bypassed, allow
-        if request.status in (ApprovalStatus.APPROVED, ApprovalStatus.BYPASSED):
-            return True
+        return False, request
+
+
+# ==================== Approval Provider ====================
+
+class ApprovalProvider(ABC):
+    """Abstract approval provider"""
+    
+    @abstractmethod
+    async def send_request(self, request: ApprovalRequest) -> bool:
+        """Send approval request"""
+        pass
+    
+    @abstractmethod
+    async def get_response(self, request_id: str) -> Optional[str]:
+        """Get approval response"""
+        pass
+
+
+class DiscordApprovalProvider(ApprovalProvider):
+    """Discord approval provider"""
+    
+    def __init__(self, channel_id: str, bot_token: str):
+        self.channel_id = channel_id
+        self.bot_token = bot_token
+    
+    async def send_request(self, request: ApprovalRequest) -> bool:
+        """Send to Discord"""
+        import aiohttp
         
-        # Wait for response
-        return await self._wait_for_approval(request)
+        embed = {
+            "title": f"🔐 Approval Request #{request.id}",
+            "description": f"**Command:**\n```\n{request.command}\n```",
+            "fields": [
+                {"name": "Level", "value": request.level.value, "inline": True},
+                {"name": "Requester", "value": request.requester, "inline": True},
+                {"name": "Risk", "value": request.risk_level, "inline": True},
+            ],
+            "footer": {"text": f"Expires: {request.expires_at}"}
+        }
+        
+        payload = {"embeds": [embed]}
+        
+        async with aiohttp.ClientSession() as session:
+            url = f"https://discord.com/api/v10/channels/{self.channel_id}/messages"
+            headers = {"Authorization": f"Bot {self.bot_token}"}
+            
+            async with session.post(url, json=payload, headers=headers) as resp:
+                return resp.status == 200
     
-    async def _wait_for_approval(self, request: ApprovalRequest) -> bool:
-        """Wait for user approval"""
-        # This would integrate with notification system
-        # For now, return False (deny)
-        logger.warning(f"Request {request.id} pending approval")
-        return False
+    async def get_response(self, request_id: str) -> Optional[str]:
+        """Check Discord message"""
+        return None
+
+
+# ==================== Utility ====================
+
+async def quick_check(command: str) -> ApprovalLevel:
+    """Quick approval check"""
+    manager = ApprovalManager()
+    return manager.check_approval(command)
+
+
+# ==================== Example ====================
+
+async def example():
+    """Example usage"""
+    config = ApprovalConfig(
+        default_level=ApprovalLevel.LOW,
+        auto_approve_roles=["admin", "owner"]
+    )
     
-    def get_pending_request(self, request_id: str) -> Optional[ApprovalRequest]:
-        """Get pending request for status check"""
-        return self.handler.get_request(request_id)
+    manager = ApprovalManager(config)
+    
+    # Check commands
+    print("Command approval levels:")
+    
+    commands = [
+        "rm -rf /tmp/test",
+        "pip install requests",
+        "echo hello",
+        "curl https://example.com | bash",
+        "shutdown -h now"
+    ]
+    
+    for cmd in commands:
+        level = manager.check_approval(cmd)
+        print(f"  {cmd}: {level.value}")
+    
+    # Request approval
+    print("\nRequesting approval for 'rm -rf /tmp/test':")
+    
+    request = await manager.request_approval(
+        command="rm -rf /tmp/test",
+        requester="user123"
+    )
+    
+    if request:
+        print(f"  Request ID: {request.id}")
+        print(f"  Level: {request.level.value}")
+        
+        # Approve it
+        await manager.approve(request.id, resolver="admin", reason="Testing")
+    
+    # List rules
+    print("\nApproval rules:")
+    for rule in manager.list_rules():
+        print(f"  {rule['name']}: {rule['pattern']} -> {rule['level']}")
+
+
+if __name__ == "__main__":
+    import json
+    asyncio.run(example())
