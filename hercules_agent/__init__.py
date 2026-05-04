@@ -9,8 +9,11 @@ from hercules_agent.plugins.plugin_manager import PluginManager, PluginRegistry
 from hercules_agent.compression.context_compressor import ContextCompressor, ConversationManager
 from hercules_agent.browser.browser_manager import Browser, BrowserManager
 from hercules_agent.vision.vision_manager import VisionManager, VisionConfig
-from hercules_agent.multiagent.multi_agent_manager import MultiAgentManager, AgentOrchestrator
-from hercules_agent.approval.approval_manager import ApprovalHandler, ApprovalMiddleware
+from hercules_agent.multi_agent.multi_agent_manager import MultiAgentManager, AgentOrchestrator
+from hercules_agent.approval.approval_manager import ApprovalManager, ApprovalMiddleware, ApprovalLevel, ApprovalRequest
+from hercules_agent.llm.provider import LLMManager, LLMConfig, ChatMessage, ChatCompletion, LLMProvider
+from hercules_agent.agent_loop.agent_loop import AgentLoop, AgentConfig, AgentState
+from hercules_agent.skills.skill_system import SkillRegistry, SkillDefinition, SkillContext, SkillResult
 
 __version__ = "1.0.0"
 
@@ -54,6 +57,26 @@ __all__ = [
     "AgentOrchestrator",
     
     # Approval
-    "ApprovalHandler",
+    "ApprovalManager",
     "ApprovalMiddleware",
+    "ApprovalLevel",
+    "ApprovalRequest",
+    
+    # LLM
+    "LLMManager",
+    "LLMConfig",
+    "ChatMessage",
+    "ChatCompletion",
+    "LLMProvider",
+    
+    # Agent Loop
+    "AgentLoop",
+    "AgentConfig",
+    "AgentState",
+    
+    # Skills
+    "SkillRegistry",
+    "SkillDefinition",
+    "SkillContext",
+    "SkillResult",
 ]
