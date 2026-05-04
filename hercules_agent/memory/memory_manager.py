@@ -1,380 +1,500 @@
-"""
-Memory Manager module for Hercules Agent.
-Handles SQLite persistence for conversations and messages with cross-session support.
-"""
-import sqlite3
-import os
+# Memory System module for Hercules Agent
+# Long-term memory (episodic/semantic)
+
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable
+from enum import Enum
 import json
-import asyncio
-from typing import List, Optional, Dict, Any
-from dataclasses import dataclass, field, asdict
+import os
+import sqlite3
+import logging
+import uuid
 from datetime import datetime
-import aiosqlite
+from collections import defaultdict
 
-from .litellm_provider import Message, Conversation
+logger = logging.getLogger(__name__)
 
 
-class MemoryManager:
-    """Handles SQLite persistence for conversations and messages"""
+class MemoryType(Enum):
+    """Memory types"""
+    EPISODIC = "episodic"     # Specific events/experiences
+    SEMANTIC = "semantic"     # Facts, concepts, knowledge
+    WORKING = "working"       # Current conversation context
+    PROCEDURAL = "procedural"  # Skills, procedures
+
+
+@dataclass
+class MemoryEntry:
+    """Single memory entry"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    type: MemoryType = MemoryType.EPISODIC
     
-    def __init__(self, db_path: str = "./data/hercules.db"):
+    content: str = ""
+    embeddings: List[float] = field(default_factory=list)
+    
+    # Metadata
+    importance: float = 0.5  # 0-1
+    tags: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.now)
+    accessed_at: datetime = field(default_factory=datetime.now)
+    access_count: int = 0
+    
+    # Relations
+    related_ids: List[str] = field(default_factory=list)
+
+
+@dataclass
+class MemoryConfig:
+    """Memory configuration"""
+    enabled: bool = True
+    storage_path: str = "~/.hermes/memory.db"
+    max_entries: int = 10000
+    
+    # Vector search
+    enable_semantic_search: bool = True
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    
+    # Retention
+    episodic_retention_days: int = 30
+    semantic_persistence: bool = True
+    
+    # Working memory
+    working_memory_size: int = 10
+
+
+# ==================== Vector Store ====================
+
+class VectorStore:
+    """Simple vector store for semantic search"""
+    
+    def __init__(self, db_path: str):
         self.db_path = db_path
         self._init_db()
     
     def _init_db(self):
-        """Initialize the database schema"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        """Initialize SQLite database"""
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
         
-        with sqlite3.connect(self.db_path) as conn:
-            # Conversations table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    model TEXT,
-                    system_prompt TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL,
-                    metadata TEXT
-                )
-            """)
-            
-            # Messages table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS messages (
-                    id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    name TEXT,
-                    tool_calls TEXT,
-                    timestamp REAL NOT NULL,
-                    FOREIGN KEY (conversation_id) REFERENCES conversations (id)
-                )
-            """)
-            
-            # User profiles table (cross-session memory)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_profiles (
-                    user_id TEXT PRIMARY KEY,
-                    name TEXT,
-                    preferences TEXT,
-                    context TEXT,
-                    created_at REAL NOT NULL,
-                    updated_at REAL NOT NULL
-                )
-            """)
-            
-            # Skills usage tracking
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS skill_usage (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    skill_name TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    success INTEGER,
-                    timestamp REAL NOT NULL
-                )
-            """)
-            
-            # Create indexes
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_messages_conversation 
-                ON messages(conversation_id, timestamp)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_skill_usage_skill 
-                ON skill_usage(skill_name, timestamp)
-            """)
-            
-            conn.commit()
-        print(f"Database initialized at {self.db_path}")
-    
-    # ==================== Conversations ====================
-    
-    async def save_conversation(self, conversation: Conversation):
-        """Save or update a conversation"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO conversations
-                (id, user_id, provider, model, system_prompt, created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                conversation.id, 
-                conversation.user_id, 
-                conversation.provider,
-                conversation.model,
-                conversation.metadata.get("system_prompt", ""),
-                conversation.created_at, 
-                conversation.updated_at,
-                json.dumps(conversation.metadata)
-            ))
-            await db.commit()
-    
-    async def get_conversation(self, conversation_id: str) -> Optional[Conversation]:
-        """Retrieve a conversation by ID"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = sqlite3.Row
-            async with db.execute("""
-                SELECT * FROM conversations WHERE id = ?
-            """, (conversation_id,)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    return Conversation(
-                        id=row["id"],
-                        user_id=row["user_id"],
-                        provider=row["provider"],
-                        model=row["model"] or "gpt-4o",
-                        created_at=row["created_at"],
-                        updated_at=row["updated_at"],
-                        metadata=json.loads(row["metadata"] or "{}")
-                    )
-                return None
-    
-    async def list_conversations(
-        self, 
-        user_id: str, 
-        limit: int = 50,
-        include_metadata: bool = False
-    ) -> List[Conversation]:
-        """List conversations for a user"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = sqlite3.Row
-            async with db.execute("""
-                SELECT * FROM conversations 
-                WHERE user_id = ?
-                ORDER BY updated_at DESC
-                LIMIT ?
-            """, (user_id, limit)) as cursor:
-                rows = await cursor.fetchall()
-                return [
-                    Conversation(
-                        id=row["id"],
-                        user_id=row["user_id"],
-                        provider=row["provider"],
-                        model=row["model"] or "gpt-4o",
-                        created_at=row["created_at"],
-                        updated_at=row["updated_at"],
-                        metadata=json.loads(row["metadata"] or "{}") if include_metadata else {}
-                    )
-                    for row in rows
-                ]
-    
-    async def delete_conversation(self, conversation_id: str):
-        """Delete a conversation and its messages"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-            await db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
-            await db.commit()
-    
-    # ==================== Messages ====================
-    
-    async def save_message(self, message: Message):
-        """Save a message"""
-        # Serialize tool_calls if present
-        tool_calls_json = None
-        if message.metadata and message.metadata.get("tool_calls"):
-            tool_calls_json = json.dumps(message.metadata["tool_calls"])
+        conn = sqlite3.connect(os.path.expanduser(self.db_path))
+        cursor = conn.cursor()
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO messages (id, conversation_id, role, content, name, tool_calls, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (
-                message.id,
-                message.conversation_id,
-                message.role,
-                message.content,
-                message.name,
-                tool_calls_json,
-                message.timestamp
-            ))
-            await db.commit()
-    
-    async def get_messages(
-        self, 
-        conversation_id: str, 
-        limit: int = 50,
-        offset: int = 0
-    ) -> List[Message]:
-        """Retrieve messages for a conversation"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = sqlite3.Row
-            async with db.execute("""
-                SELECT * FROM messages
-                WHERE conversation_id = ?
-                ORDER BY timestamp ASC
-                LIMIT ? OFFSET ?
-            """, (conversation_id, limit, offset)) as cursor:
-                rows = await cursor.fetchall()
-                messages = []
-                for row in rows:
-                    metadata = {}
-                    if row["tool_calls"]:
-                        metadata["tool_calls"] = json.loads(row["tool_calls"])
-                    messages.append(Message(
-                        id=row["id"],
-                        conversation_id=row["conversation_id"],
-                        role=row["role"],
-                        content=row["content"],
-                        name=row["name"],
-                        timestamp=row["timestamp"],
-                        metadata=metadata
-                    ))
-                return messages
-    
-    async def get_recent_messages(
-        self, 
-        conversation_id: str, 
-        num_messages: int = 10
-    ) -> List[Message]:
-        """Get the most recent N messages (from the end)"""
-        all_messages = await self.get_messages(conversation_id, limit=1000)
-        return all_messages[-num_messages:] if all_messages else []
-    
-    # ==================== User Profiles (Cross-Session) ====================
-    
-    async def save_user_profile(
-        self,
-        user_id: str,
-        name: Optional[str] = None,
-        preferences: Optional[Dict] = None,
-        context: Optional[Dict] = None
-    ):
-        """Save or update user profile"""
-        now = asyncio.get_event_loop().time()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vectors (
+                id TEXT PRIMARY KEY,
+                memory_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
         
-        # Get existing profile
-        existing = await self.get_user_profile(user_id)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memory_id ON vectors(memory_id)
+        """)
         
-        if existing:
-            # Merge preferences and context
-            merged_prefs = {**(existing.get("preferences", {}) or {}), **(preferences or {})}
-            merged_ctx = {**(existing.get("context", {}) or {}), **(context or {})}
-        else:
-            merged_prefs = preferences or {}
-            merged_ctx = context or {}
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_type ON vectors(type)
+        """)
         
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO user_profiles
-                (user_id, name, preferences, context, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                user_id,
-                name or existing.get("name") if existing else None,
-                json.dumps(merged_prefs),
-                json.dumps(merged_ctx),
-                now if not existing else existing.get("created_at", now),
-                now
-            ))
-            await db.commit()
+        conn.commit()
+        conn.close()
     
-    async def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Get user profile"""
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = sqlite3.Row
-            async with db.execute("""
-                SELECT * FROM user_profiles WHERE user_id = ?
-            """, (user_id,)) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    return {
-                        "user_id": row["user_id"],
-                        "name": row["name"],
-                        "preferences": json.loads(row["preferences"] or "{}"),
-                        "context": json.loads(row["context"] or "{}"),
-                        "created_at": row["created_at"],
-                        "updated_at": row["updated_at"]
-                    }
-                return None
+    def add_vector(self, memory_id: str, vector: List[float]):
+        """Add vector to store"""
+        conn = sqlite3.connect(os.path.expanduser(self.db_path))
+        cursor = conn.cursor()
+        
+        # Serialize vector as bytes
+        vector_bytes = json.dumps(vector).encode()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO vectors (id, memory_id, type, vector, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (str(uuid.uuid4())[:12], memory_id, "semantic", vector_bytes, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
     
-    async def update_user_context(self, user_id: str, key: str, value: Any):
-        """Update a specific context value for a user"""
-        profile = await self.get_user_profile(user_id)
-        context = profile.get("context", {}) if profile else {}
-        context[key] = value
-        await self.save_user_profile(user_id, context=context)
+    def search(self, query_vector: List[float], limit: int = 5) -> List[Dict]:
+        """Search similar vectors (simple cosine similarity)"""
+        conn = sqlite3.connect(os.path.expanduser(self.db_path))
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, memory_id, vector FROM vectors WHERE type = 'semantic'")
+        
+        results = []
+        for row in cursor.fetchall():
+            stored_vector = json.loads(row[2].decode())
+            similarity = self._cosine_similarity(query_vector, stored_vector)
+            results.append({
+                "memory_id": row[1],
+                "similarity": similarity
+            })
+        
+        conn.close()
+        
+        # Sort by similarity and return top results
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:limit]
     
-    # ==================== Skill Usage ====================
+    def _cosine_similarity(self, v1: List[float], v2: List[float]) -> float:
+        """Calculate cosine similarity"""
+        dot = sum(a * b for a, b in zip(v1, v2))
+        mag1 = sum(a * a for a in v1) ** 0.5
+        mag2 = sum(b * b for b in v2) ** 0.5
+        
+        if mag1 == 0 or mag2 == 0:
+            return 0.0
+        
+        return dot / (mag1 * mag2)
+
+
+# ==================== Memory Store ====================
+
+class MemoryStore:
+    """SQLite-based memory storage"""
     
-    async def log_skill_usage(
-        self,
-        skill_name: str,
-        user_id: str,
-        success: bool = True
-    ):
-        """Log skill usage for analytics"""
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO skill_usage (skill_name, user_id, success, timestamp)
-                VALUES (?, ?, ?, ?)
-            """, (skill_name, user_id, 1 if success else 0, asyncio.get_event_loop().time()))
-            await db.commit()
+    def __init__(self, config: MemoryConfig):
+        self.config = config
+        self.db_path = os.path.expanduser(config.storage_path)
+        self._init_db()
+        self._vector_store = VectorStore(self.db_path) if config.enable_semantic_search else None
     
-    async def get_skill_stats(self, skill_name: str = None) -> List[Dict]:
-        """Get skill usage statistics"""
-        query = """
-            SELECT skill_name, 
-                   COUNT(*) as total_uses,
-                   SUM(success) as successful_uses,
-                   AVG(success) * 100 as success_rate
-            FROM skill_usage
-        """
+    def _init_db(self):
+        """Initialize memory database"""
+        os.makedirs(os.path.dirname(self.db_path) or ".", exist_ok=True)
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memories (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                importance REAL DEFAULT 0.5,
+                tags TEXT,
+                metadata TEXT,
+                created_at TEXT NOT NULL,
+                accessed_at TEXT NOT NULL,
+                access_count INTEGER DEFAULT 0,
+                related_ids TEXT
+            )
+        """)
+        
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_type ON memories(type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_created ON memories(created_at)")
+        
+        conn.commit()
+        conn.close()
+    
+    def save(self, entry: MemoryEntry):
+        """Save memory entry"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT OR REPLACE INTO memories 
+            (id, type, content, importance, tags, metadata, created_at, accessed_at, access_count, related_ids)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            entry.id,
+            entry.type.value,
+            entry.content,
+            entry.importance,
+            json.dumps(entry.tags),
+            json.dumps(entry.metadata),
+            entry.created_at.isoformat(),
+            entry.accessed_at.isoformat(),
+            entry.access_count,
+            json.dumps(entry.related_ids)
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        # Also save vector if available
+        if self._vector_store and entry.embeddings:
+            self._vector_store.add_vector(entry.id, entry.embeddings)
+    
+    def get(self, memory_id: str) -> Optional[MemoryEntry]:
+        """Get memory by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        row = cursor.fetchone()
+        
+        conn.close()
+        
+        if not row:
+            return None
+        
+        return self._row_to_entry(row)
+    
+    def search(self, query: str = None, memory_type: MemoryType = None, limit: int = 10) -> List[MemoryEntry]:
+        """Search memories"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        sql = "SELECT * FROM memories WHERE 1=1"
         params = []
-        if skill_name:
-            query += " WHERE skill_name = ?"
-            params.append(skill_name)
-        query += " GROUP BY skill_name"
         
-        async with aiosqlite.connect(self.db_path) as db:
-            db.row_factory = sqlite3.Row
-            async with db.execute(query, params) as cursor:
-                rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+        if memory_type:
+            sql += " AND type = ?"
+            params.append(memory_type.value)
+        
+        sql += " ORDER BY importance DESC, accessed_at DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        
+        conn.close()
+        
+        return [self._row_to_entry(row) for row in rows]
     
-    # ==================== Utility ====================
+    def semantic_search(self, query_vector: List[float], limit: int = 5) -> List[MemoryEntry]:
+        """Semantic search using vectors"""
+        if not self._vector_store:
+            return []
+        
+        results = self._vector_store.search(query_vector, limit)
+        
+        memories = []
+        for result in results:
+            memory = self.get(result["memory_id"])
+            if memory:
+                memories.append(memory)
+        
+        return memories
     
-    async def get_token_count(self, conversation_id: str) -> int:
-        """Estimate token count for a conversation (simple estimation)"""
-        messages = await self.get_messages(conversation_id)
-        total_chars = sum(len(m.content) for m in messages)
-        # Rough estimation: 1 token ~ 4 characters
-        return total_chars // 4
+    def delete(self, memory_id: str) -> bool:
+        """Delete memory"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        conn.close()
+        
+        return deleted
     
-    async def compress_conversation(self, conversation_id: str, target_tokens: int = 4000):
-        """Compress conversation by keeping only recent messages"""
-        current_tokens = await self.get_token_count(conversation_id)
-        if current_tokens <= target_tokens:
-            return
+    def _row_to_entry(self, row) -> MemoryEntry:
+        """Convert database row to MemoryEntry"""
+        return MemoryEntry(
+            id=row[0],
+            type=MemoryType(row[1]),
+            content=row[2],
+            importance=row[3],
+            tags=json.loads(row[4]),
+            metadata=json.loads(row[5]),
+            created_at=datetime.fromisoformat(row[6]),
+            accessed_at=datetime.fromisoformat(row[7]),
+            access_count=row[8],
+            related_ids=json.loads(row[9])
+        )
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get memory statistics"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         
-        # Get messages and compress
-        messages = await self.get_messages(conversation_id)
+        cursor.execute("SELECT type, COUNT(*) FROM memories GROUP BY type")
+        by_type = dict(cursor.fetchall())
         
-        # Keep system message if exists, plus recent messages
-        system_msg = messages[0] if messages and messages[0].role == "system" else None
-        other_msgs = [m for m in messages if m.role != "system"]
+        cursor.execute("SELECT COUNT(*) FROM memories")
+        total = cursor.fetchone()[0]
         
-        # Binary search to find how many messages fit in target_tokens
-        # Keep approximately last 2/3 of messages
-        compressed = other_msgs[len(other_msgs)//3:] if len(other_msgs) > 3 else other_msgs
+        conn.close()
         
-        final_messages = [system_msg] + compressed if system_msg else compressed
+        return {
+            "total": total,
+            "by_type": by_type,
+        }
+
+
+# ==================== Memory Manager ====================
+
+class MemoryManager:
+    """Main memory manager with episodic/semantic/working memory"""
+    
+    def __init__(self, config: MemoryConfig = None):
+        self.config = config or MemoryConfig()
+        self.store = MemoryStore(self.config)
         
-        # Delete old messages and insert compressed
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-            for msg in final_messages:
-                await db.execute("""
-                    INSERT INTO messages (id, conversation_id, role, content, name, tool_calls, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    msg.id,
-                    msg.conversation_id,
-                    msg.role,
-                    msg.content,
-                    msg.name,
-                    json.dumps(msg.metadata.get("tool_calls")) if msg.metadata else None,
-                    msg.timestamp
-                ))
-            await db.commit()
+        self._working_memory: List[MemoryEntry] = []
+        self._embedding_fn: Optional[Callable[[str], List[float]]] = None
+    
+    def set_embedding_fn(self, fn: Callable[[str], List[float]]):
+        """Set embedding function for semantic search"""
+        self._embedding_fn = fn
+    
+    async def add(
+        self,
+        content: str,
+        memory_type: MemoryType = MemoryType.EPISODIC,
+        importance: float = 0.5,
+        tags: List[str] = None,
+        metadata: Dict[str, Any] = None
+    ) -> MemoryEntry:
+        """Add new memory"""
+        entry = MemoryEntry(
+            type=memory_type,
+            content=content,
+            importance=importance,
+            tags=tags or [],
+            metadata=metadata or {}
+        )
+        
+        # Generate embeddings for semantic memory
+        if memory_type == MemoryType.SEMANTIC and self._embedding_fn:
+            entry.embeddings = self._embedding_fn(content)
+        
+        # Add to working memory if working type
+        if memory_type == MemoryType.WORKING:
+            self._working_memory.append(entry)
+            if len(self._working_memory) > self.config.working_memory_size:
+                self._working_memory.pop(0)
+        
+        self.store.save(entry)
+        
+        logger.debug(f"Added memory: {entry.id} ({memory_type.value})")
+        return entry
+    
+    def get(self, memory_id: str) -> Optional[MemoryEntry]:
+        """Get memory by ID"""
+        entry = self.store.get(memory_id)
+        
+        if entry:
+            entry.access_count += 1
+            entry.accessed_at = datetime.now()
+            self.store.save(entry)
+        
+        return entry
+    
+    def recall(
+        self,
+        query: str = None,
+        memory_type: MemoryType = None,
+        limit: int = 5
+    ) -> List[MemoryEntry]:
+        """Recall memories"""
+        # If query provided and embeddings available, do semantic search
+        if query and self._embedding_fn and self.store._vector_store:
+            query_vector = self._embedding_fn(query)
+            return self.store.semantic_search(query_vector, limit)
+        
+        return self.store.search(query, memory_type, limit)
+    
+    def get_working_memory(self) -> List[str]:
+        """Get current working memory contents"""
+        return [m.content for m in self._working_memory]
+    
+    async def remember_recent(self, limit: int = 5) -> List[MemoryEntry]:
+        """Get recent memories"""
+        return self.store.search(limit=limit)
+    
+    async def remember_topic(self, topic: str) -> List[MemoryEntry]:
+        """Remember specific topic"""
+        return self.store.search(query=topic, memory_type=MemoryType.SEMANTIC, limit=10)
+    
+    def link_memories(self, id1: str, id2: str):
+        """Link two memories together"""
+        entry1 = self.store.get(id1)
+        entry2 = self.store.get(id2)
+        
+        if entry1 and entry2:
+            if id2 not in entry1.related_ids:
+                entry1.related_ids.append(id2)
+            if id1 not in entry2.related_ids:
+                entry2.related_ids.append(id1)
+            
+            self.store.save(entry1)
+            self.store.save(entry2)
+    
+    def consolidate(self):
+        """Consolidate working memory to episodic"""
+        for entry in self._working_memory:
+            self.store.save(entry)
+        
+        self._working_memory.clear()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get memory statistics"""
+        stats = self.store.get_stats()
+        stats["working_memory"] = len(self._working_memory)
+        return stats
+    
+    def clear(self, memory_type: MemoryType = None):
+        """Clear memories"""
+        if memory_type:
+            memories = self.store.search(memory_type=memory_type, limit=10000)
+            for m in memories:
+                self.store.delete(m.id)
+        else:
+            # Clear all
+            conn = sqlite3.connect(self.store.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM memories")
+            conn.commit()
+            conn.close()
+
+
+# ==================== Simple Embeddings (Fallback) ====================
+
+class SimpleEmbeddings:
+    """Simple bag-of-words embeddings (fallback when no model)"""
+    
+    def __init__(self):
+        self._vocab: Dict[str, int] = {}
+        self._vectors: Dict[str, Dict[int, float]] = {}
+    
+    def fit(self, texts: List[str]):
+        """Build vocabulary from texts"""
+        for text in texts:
+            words = text.lower().split()
+            for word in words:
+                if word not in self._vocab:
+                    self._vocab[word] = len(self._vocab)
+        
+        # Build vectors
+        for text in texts:
+            words = text.lower().split()
+            vector = defaultdict(float)
+            
+            for word in words:
+                idx = self._vocab.get(word)
+                if idx is not None:
+                    vector[idx] += 1
+            
+            self._vectors[text[:50]] = dict(vector)
+    
+    def encode(self, text: str) -> List[float]:
+        """Encode text to vector"""
+        words = text.lower().split()
+        vector = defaultdict(float)
+        
+        for word in words:
+            idx = self._vocab.get(word)
+            if idx is not None:
+                vector[idx] += 1
+        
+        # Normalize
+        magnitude = sum(v * v for v in vector.values()) ** 0.5
+        if magnitude > 0:
+            for idx in vector:
+                vector[idx] /= magnitude
+        
+        # Pad to fixed size
+        result = [0.0] * min(len(self._vocab), 384)
+        for idx, val in vector.items():
+            if idx < 384:
+                result[idx] = val
+        
+        return result
