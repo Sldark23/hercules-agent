@@ -1,85 +1,45 @@
-# 🜸 Hercules Agent
+# Hercules Agent
 
-Multi-platform AI Agent com abstração de LLM, skill system, e suporte MCP.
+Modular AI Agent Framework com 10 módulos principais:
 
-## Recursos
+- **Voice** - TTS/STT (Edge, ElevenLabs, OpenAI, Whisper)
+- **Webhooks** - Triggers externos para o agente
+- **Cron Jobs** - Tarefas agendadas
+- **Profiles** - Múltiplos perfiles isolados
+- **Plugins** - Sistema de extensões
+- **Context Compression** - Auto-compressão de conversas longas
+- **Browser** - Automação via CDP (Playwright)
+- **Vision** - Análise de imagens (GPT-4V, Claude, Groq)
+- **Multi-Agent** - Execução de sub-agentes
+- **Approval Manager** - Aprovar/denegar comandos perigosos
 
-- **🔥 100+ LLM Providers** — Via litellm (OpenRouter, Anthropic, OpenAI, Gemini, DeepSeek, Groq, etc.)
-- **📱 Multi-Platform Gateway** — Telegram, Discord, Slack, WhatsApp
-- **🧠 Skill System** — Skills discovery, auto-save, skill routing
-- **💾 Cross-Session Memory** — SQLite com user profiles e context persistence
-- **🔌 MCP Support** — Ferramentas externas via MCP servers
-
-## Quick Start
+## Instalação
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Copy and configure environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# Run interactively
-python -m hercules_agent.cli --interactive
-
-# Or run as gateway
-python -m hercules_agent.cli --gateway
+pip install hercules-agent
 ```
 
-## Configuração
+## Uso
 
 ```python
-# Quick config example
-from hercules_agent import AgentController, AgentConfig
-from hercules_agent.providers import LLMProvider
+from hercules_agent import VoiceManager, VisionManager, MultiAgentManager
 
-config = AgentConfig(
-    default_provider=LLMProvider.OPENROUTER,
-    default_model="anthropic/claude-sonnet-4",
-    allowed_user_ids={"123456789"},  # Telegram user IDs
-)
+# Voice
+voice = VoiceManager()
+await voice.speak("Hello!")
 
-agent = AgentController(config)
-await agent.initialize()
+# Vision
+vision = VisionManager()
+result = await vision.analyze("image.jpg", "Describe this image")
+
+# Multi-Agent
+manager = MultiAgentManager(executor_fn=my_executor)
+agent = await manager.spawn(goal="Research topic", name="researcher")
+result = await manager.execute(agent.id)
 ```
 
 ## CLI
 
 ```bash
-# Interactive mode
-hercules -i
-
-# Gateway mode  
-hercules -g
-
-# Custom model
-hercules -m anthropic/claude-sonnet-4 -p openrouter -i
+hercules --help
 ```
-
-## Estrutura
-
-```
-hercules_agent/
-├── core/           # Agent controller
-├── providers/      # LLM providers (litellm)
-├── gateways/       # Messaging platforms
-├── skills/         # Skill system
-├── memory/        # SQLite persistence
-├── mcp/           # MCP client
-└── cli.py         # CLI entrypoint
-```
-
-## Documentação
-
-- [PRD](./PRD.md) — Product Requirements
-- [ Providers](hercules_agent/providers/litellm_provider.py) — 20+ provedores
-- [Skills](hercules_agent/skills/manager.py) — Sistema de skills
-- [MCP](hercules_agent/mcp/mcp_client.py) — Suporte a MCP servers
-
-## Inspirado em
-
-- Hermes Agent (Nous Research)
-- OpenClaw
-- Claude Code (Anthropic)
-- Codex (OpenAI)
