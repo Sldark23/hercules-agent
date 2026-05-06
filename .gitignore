@@ -65,6 +65,7 @@ instance/
 
 # Documentation build:
 docs/_build/
+attached_assets
 
 # PyBullet
 .pybulletcache

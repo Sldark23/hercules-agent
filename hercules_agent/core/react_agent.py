@@ -70,21 +70,62 @@ Feel free to reason out loud before taking action. Your thoughts help the \
 user follow your reasoning. Start reasoning sections with a brief statement \
 of what you're trying to figure out.
 
+## Tools available
+shell, read_file, write_file, patch_file, diff, list_dir, glob, grep, python_exec, \
+web_search (supports fetch_content=true), http_get, http_post, \
+memo_write, memo_read, todo_write, todo_read
+
 ## Environment
 Working directory: {cwd}
 Platform: {platform}
 Date/time (UTC): {now}
 Python: {python_ver}
-"""
+{git_context}{project_type}"""
 
 
 def _build_system_prompt() -> str:
-    import sys, platform as plat
+    import subprocess, sys, platform as plat
+
+    # Git context — branch + last commit (silently skip if not a git repo)
+    git_context = ""
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=3,
+        ).decode().strip()
+        last_commit = subprocess.check_output(
+            ["git", "log", "-1", "--oneline"],
+            stderr=subprocess.DEVNULL, timeout=3,
+        ).decode().strip()
+        git_context = f"Git branch: {branch}  |  Last commit: {last_commit}\n"
+    except Exception:
+        pass
+
+    # Project type detection
+    cwd = os.getcwd()
+    project_type = ""
+    markers = [
+        ("pyproject.toml", "Python (pyproject)"),
+        ("setup.py",       "Python (setup.py)"),
+        ("requirements.txt","Python"),
+        ("package.json",   "Node.js"),
+        ("Cargo.toml",     "Rust"),
+        ("go.mod",         "Go"),
+        ("pom.xml",        "Java/Maven"),
+        ("build.gradle",   "Java/Gradle"),
+    ]
+    for filename, label in markers:
+        if os.path.exists(os.path.join(cwd, filename)):
+            project_type = f"Project type: {label}\n"
+            break
+
     return SYSTEM_PROMPT.format(
-        cwd=os.getcwd(),
+        cwd=cwd,
         platform=plat.system(),
         now=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
         python_ver=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        git_context=git_context,
+        project_type=project_type,
     )
 
 

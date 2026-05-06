@@ -1,6 +1,6 @@
 # Hercules Agent
 
-Autonomous AI agent with a ReAct loop, true token-by-token streaming, Rich terminal UI, 11 real tools (shell/file/web/code/todos), thinking-block display, and a shell installer — inspired by Hermes Agent and OpenClaw/Claude Code.
+Autonomous AI agent with a ReAct loop, true token-by-token streaming, Rich terminal UI, 16 built-in tools, thinking-block display, persistent cross-session memory, and multi-provider LLM support.
 
 ## Run & Operate
 
@@ -8,7 +8,7 @@ Autonomous AI agent with a ReAct loop, true token-by-token streaming, Rich termi
 # Interactive CLI (default)
 python3 hercules_agent/cli.py --interactive
 
-# One-shot task (--print mode, like Claude Code)
+# One-shot task (--print mode)
 python3 hercules_agent/cli.py --print "find all TODO comments in the codebase"
 
 # Specific model/provider
@@ -21,11 +21,6 @@ python3 hercules_agent/cli.py --compact
 
 # Multi-platform gateway (Telegram / Discord / Slack)
 python3 hercules_agent/cli.py --gateway
-
-# Shell installer (creates ~/.hercules/ and `hercules` CLI command)
-bash install.sh
-bash install.sh --yes          # non-interactive
-bash install.sh --uninstall    # remove
 ```
 
 **Required env vars** (set via Replit Secrets or `.env`):
@@ -46,42 +41,32 @@ bash install.sh --uninstall    # remove
 ## Where things live
 
 - `hercules_agent/cli.py` — Rich CLI entry point; streaming renderer, todo sidebar, all slash commands
-- `hercules_agent/core/react_agent.py` — **ReactAgent**: streaming ReAct loop, `StreamEvent` typed events, thinking-block detector, interrupt support
+- `hercules_agent/core/react_agent.py` — **ReactAgent**: streaming ReAct loop, git-aware system prompt, interrupt support
 - `hercules_agent/core/token_tracker.py` — `SessionTracker` / `TurnUsage`; per-model cost table
 - `hercules_agent/core/conversation_store.py` — SQLite conversation/message persistence
-- `hercules_agent/tools/builtin_tools.py` — 11 tools: shell, read/write/patch_file, list_dir, grep, python_exec, web_search, http_get, todo_write, todo_read
-- `hercules_agent/core/agent_controller.py` — legacy orchestrator (gateway mode only)
-- `hercules_agent/providers/litellm_provider.py` — ProviderFactory (gateway)
+- `hercules_agent/tools/builtin_tools.py` — 16 tools: shell, read/write/patch/diff file, list_dir, glob, grep, python_exec, web_search, http_get, http_post, memo_write, memo_read, todo_write, todo_read
 - `hercules_agent/gateways/gateway.py` — Telegram/Discord/Slack gateway manager
-- `hercules_agent/memory/memory_manager.py` — episodic/semantic memory (MemoryStore, VectorStore)
 - `hercules_agent/mcp/mcp_client.py` — MCP server client (stdio + HTTP)
-- `install.sh` — shell installer (venv, deps, `~/.local/bin/hercules` wrapper, API key prompt)
-- `config/platforms.json` — gateway platform config
+- `~/.hercules_memo.md` — persistent cross-session memory file
 
 ## Architecture decisions
 
 - **True streaming**: `litellm.acompletion(..., stream=True)` — tool-call deltas accumulated per-index, yielded as `StreamEvent(TOOL_START/END)` after each tool completes; text chunks emit `TEXT` or `THINKING` events live
-- **Typed event stream**: `ReactAgent.run()` is an async generator of `StreamEvent` objects (`EventKind` enum: TEXT, THINKING, TOOL_START, TOOL_END, USAGE, ERROR, DONE) — the CLI renders each kind differently with no coupling to the agent internals
-- **Thinking blocks**: `_is_thinking_context()` counts unmatched `<thinking>` open tags to decide whether current tokens are "thinking" (rendered dim/italic) or regular response (rendered white)
-- **Token tracking**: `SessionTracker` records per-turn + session totals; `MODEL_COSTS` dict covers 20+ models for USD cost estimates shown after every response
-- **Todo tools**: `todo_write`/`todo_read` use module-level `_TODO_LIST`; `get_todos()` exposes it to the CLI for live sidebar rendering after each `todo_write` call
-- **Interrupt**: SIGINT handler calls `agent.interrupt()` which sets a flag checked at each streaming iteration; graceful abort shows partial output
-- **Compact mode**: `--compact` flag (or `/compact-mode` toggle) collapses tool panels to single dim lines for speed; errors always shown in full
-- Gateway mode still uses `AgentController` + `ProviderFactory`; now uses `ConversationStore` (broken `MemoryManager` API calls removed)
-- History injected as plain user/assistant pairs — tool messages from past turns are not re-injected (avoids orphaned `tool_call_id` errors)
+- **Typed event stream**: `ReactAgent.run()` is an async generator of `StreamEvent` objects (`EventKind` enum: TEXT, THINKING, TOOL_START, TOOL_END, USAGE, ERROR, DONE)
+- **Git-aware system prompt**: `_build_system_prompt()` auto-detects git branch + last commit + project type at every turn
+- **Persistent memory**: `memo_write`/`memo_read` tools write to `~/.hercules_memo.md`; size shown in startup panel
+- **patch_file returns diffs**: unified diff shown after every patch so the agent can verify exactly what changed
+- **Startup context panel**: banner shows git branch, project type, and memory file size on launch
 
 ## Product
 
 - Autonomous ReAct loop: think → plan todos → use tools → verify → iterate → respond
-- **11 built-in tools**: shell, read/write/patch file, list dir, grep, python exec, web search, HTTP fetch, todo write/read
-- True token-by-token streaming with thinking shown dim/italic as it arrives
-- Tool-call panels: icon + summary line on start, result panel on completion; auto todo sidebar after `todo_write`
-- Token + cost footer after every response (`/cost` for session total)
-- Persistent input history (`~/.hercules_history`), `/compact` to compress context
-- `--print` one-shot mode: `hercules --print "fix the tests"` runs and exits
+- **16 built-in tools**: shell, read/write/patch/diff file, list_dir, glob, grep, python exec, web search (+fetch_content), http_get, http_post, memo_write/read, todo_write/read
+- True token-by-token streaming with thinking shown dim/italic; `patch_file` returns unified diffs
+- Startup panel shows git branch, project type, and memory file size
+- New CLI commands: `/sessions` (list past conversations), `/save [file]` (export to markdown), `/memo` (view persistent memory)
 - Multi-provider: switch at runtime with `/model` and `/provider`
 - Multi-platform gateway for Telegram, Discord, Slack
-- Shell installer (`install.sh`): Python check, venv, deps, `~/.local/bin/hercules`, API key wizard
 
 ## User preferences
 
@@ -89,12 +74,10 @@ _Populate as you build_
 
 ## Gotchas
 
-- `stream_options: {"include_usage": True}` passed to litellm — some providers ignore it; token counts may be 0 on those providers
-- `patch_file` requires exact whitespace match — agent must `read_file` first; returns hint showing nearest line on mismatch
-- `whatsapp-web.py>=0.1.7` unavailable on PyPI — removed from requirements
-- Telegram gateway uses `from __future__ import annotations` to avoid NameError at class parse time
-- `config/platforms.json` controls which gateways are enabled (all except Telegram disabled by default)
-- `CodeInterpreter` sandbox blocks many stdlib modules — use `sandbox=False` in `python_exec` for full access
+- `stream_options: {"include_usage": True}` passed to litellm — some providers ignore it; token counts may be 0 on those
+- `patch_file` requires exact whitespace match — agent must `read_file` first
+- `web_search` `fetch_content=true` fetches the top result's full text (up to 4000 chars) after stripping HTML
+- `glob` skips hidden directories (`.git`, `.local`, etc.) unless the pattern explicitly starts with `.`
 - On Windows/environments without UNIX signals, SIGINT handler install is silently skipped
 
 ## Pointers

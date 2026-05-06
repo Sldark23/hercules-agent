@@ -79,6 +79,38 @@ BANNER = """\
 """
 
 
+def _get_project_context() -> str:
+    """Collect git branch, project type for the startup panel."""
+    import subprocess
+    parts = []
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, timeout=3,
+        ).decode().strip()
+        last = subprocess.check_output(
+            ["git", "log", "-1", "--oneline"],
+            stderr=subprocess.DEVNULL, timeout=3,
+        ).decode().strip()
+        parts.append(f"[bold]Git:[/bold] [green]{escape(branch)}[/green]  [dim]{escape(last)}[/dim]")
+    except Exception:
+        pass
+    markers = [
+        ("pyproject.toml", "Python (pyproject)"), ("setup.py", "Python"),
+        ("requirements.txt", "Python"), ("package.json", "Node.js"),
+        ("Cargo.toml", "Rust"), ("go.mod", "Go"),
+    ]
+    for fname, label in markers:
+        if os.path.exists(fname):
+            parts.append(f"[bold]Project:[/bold] [cyan]{label}[/cyan]")
+            break
+    memo_path = os.path.expanduser("~/.hercules_memo.md")
+    if os.path.exists(memo_path):
+        size = os.path.getsize(memo_path)
+        parts.append(f"[bold]Memory:[/bold] [dim]{size} bytes[/dim]")
+    return "   ".join(parts) if parts else ""
+
+
 def _print_banner(model: str, provider: str):
     console.print(BANNER.format(ver=__version__))
     console.print(
@@ -91,6 +123,9 @@ def _print_banner(model: str, provider: str):
             padding=(0, 1),
         )
     )
+    ctx = _get_project_context()
+    if ctx:
+        console.print(Panel(ctx, box=box.SIMPLE, style="dim", padding=(0, 1)))
     console.print()
 
 
@@ -103,11 +138,16 @@ _TOOL_ICONS = {
     "read_file":   "📄",
     "write_file":  "✏️ ",
     "patch_file":  "🩹",
+    "diff":        "🔀",
     "list_dir":    "📁",
+    "glob":        "🔎",
     "grep":        "🔍",
     "python_exec": "🐍",
     "web_search":  "🌐",
     "http_get":    "🔗",
+    "http_post":   "📡",
+    "memo_write":  "🧠",
+    "memo_read":   "🧠",
     "todo_write":  "📋",
     "todo_read":   "📋",
 }
@@ -117,11 +157,16 @@ _TOOL_COLORS = {
     "read_file":   "blue",
     "write_file":  "green",
     "patch_file":  "green",
+    "diff":        "cyan",
     "list_dir":    "blue",
+    "glob":        "blue",
     "grep":        "magenta",
     "python_exec": "cyan",
     "web_search":  "yellow",
     "http_get":    "yellow",
+    "http_post":   "yellow",
+    "memo_write":  "bright_magenta",
+    "memo_read":   "bright_magenta",
     "todo_write":  "bright_white",
     "todo_read":   "bright_white",
 }
@@ -146,10 +191,18 @@ def _args_summary(name: str, args: dict) -> str:
             old = args.get("old_str", "")[:40]
             extra = f"  ← {old!r}…"
         return p + extra
+    if name == "diff":
+        a = args.get("path_a", "")
+        b = args.get("path_b") or "(proposed)"
+        return f"{a} ↔ {b}"
+    if name == "glob":
+        return f"{args.get('pattern','')} in {args.get('root','.')}"
     if name == "web_search":
-        return args.get("query", "")[:80]
-    if name == "http_get":
-        return args.get("url", "")[:80]
+        q = args.get("query", "")[:80]
+        return q + (" +content" if args.get("fetch_content") else "")
+    if name in ("http_get", "http_post"):
+        method = args.get("method", "GET") if name == "http_post" else "GET"
+        return f"{method} {args.get('url','')[:80]}"
     if name == "python_exec":
         code = args.get("code", "").split("\n")[0]
         return code[:80]
@@ -157,6 +210,8 @@ def _args_summary(name: str, args: dict) -> str:
         return f"/{args.get('pattern','')}/ in {args.get('path','.')}"
     if name == "list_dir":
         return args.get("path", ".")
+    if name in ("memo_write", "memo_read"):
+        return args.get("heading", "") or ("write" if name == "memo_write" else "read")
     if name == "todo_write":
         todos = args.get("todos", [])
         return f"{len(todos)} items"
@@ -266,8 +321,11 @@ def _print_help():
     t.add_column("Description")
     cmds = [
         ("/help",             "Show this help"),
-        ("/tools",            "List available tools"),
+        ("/tools",            "List available tools (16 built-in)"),
         ("/todos",            "Show current task list"),
+        ("/sessions",         "List recent conversations"),
+        ("/save [file]",      "Save conversation to markdown file"),
+        ("/memo",             "Show persistent memory (~/.hercules_memo.md)"),
         ("/clear",            "Clear conversation history"),
         ("/compact",          "Compress history (keep last 10 messages)"),
         ("/history",          "Show recent conversation"),
@@ -294,6 +352,74 @@ def _print_tools():
         icon = _TOOL_ICONS.get(fn["name"], "⚙")
         t.add_row(f"{icon} {fn['name']}", fn["description"].split("\n")[0][:90])
     console.print(Panel(t, title="[bold yellow]Built-in Tools[/bold yellow]", box=box.ROUNDED))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# New command helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _print_sessions(agent):
+    """List recent conversations from the store."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(agent.store.db_path)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, model, provider, created_at, updated_at FROM conversations ORDER BY updated_at DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+        if not rows:
+            console.print("[dim]No past conversations found.[/dim]")
+            return
+        t = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
+        t.add_column("ID",         style="dim",         no_wrap=True)
+        t.add_column("Model",      style="cyan",        no_wrap=True)
+        t.add_column("Provider",   style="green",       no_wrap=True)
+        t.add_column("Created",    style="dim",         no_wrap=True)
+        t.add_column("Updated",    style="dim",         no_wrap=True)
+        for r in rows:
+            t.add_row(r["id"], r["model"], r["provider"],
+                      r["created_at"][:16], r["updated_at"][:16])
+        console.print(Panel(t, title="[bold cyan]Recent Sessions[/bold cyan]", box=box.ROUNDED))
+    except Exception as e:
+        console.print(f"[red]Error reading sessions: {e}[/red]")
+
+
+def _print_memo():
+    """Display the persistent memo file."""
+    memo_path = os.path.expanduser("~/.hercules_memo.md")
+    if not os.path.exists(memo_path):
+        console.print("[dim]Memory file is empty. Ask Hercules to memo_write something to remember it.[/dim]")
+        return
+    try:
+        with open(memo_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+        from rich.markdown import Markdown
+        console.print(Panel(Markdown(content), title="[bold bright_magenta]🧠 Hercules Memory[/bold bright_magenta]", box=box.ROUNDED))
+    except Exception as e:
+        console.print(f"[red]Error reading memo: {e}[/red]")
+
+
+def _save_conversation(agent, conv_id: str, filename: Optional[str] = None):
+    """Export the current conversation to a markdown file."""
+    from datetime import datetime
+    if filename is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"hercules_chat_{ts}.md"
+    try:
+        msgs = agent.store.get_history(conv_id, limit=500)
+        if not msgs:
+            console.print("[dim]No messages to save.[/dim]")
+            return
+        lines = [f"# Hercules Conversation\n", f"_Saved: {datetime.now().strftime('%Y-%m-%d %H:%M')}  ·  Model: {agent.config.model}_\n\n---\n"]
+        for m in msgs:
+            role_label = {"user": "**You**", "assistant": "**Hercules**"}.get(m.role, f"_{m.role}_")
+            lines.append(f"\n{role_label}\n\n{m.content}\n\n---\n")
+        with open(filename, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        console.print(f"[dim]Conversation saved to [cyan]{filename}[/cyan] ({len(msgs)} messages)[/dim]")
+    except Exception as e:
+        console.print(f"[red]Error saving: {e}[/red]")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -412,6 +538,20 @@ async def run_interactive(
         if lo == "/new":
             conv_id = agent.new_conversation()
             console.print(f"[dim]New conversation: {conv_id}[/dim]")
+            continue
+
+        if lo == "/sessions":
+            _print_sessions(agent)
+            continue
+
+        if lo == "/memo":
+            _print_memo()
+            continue
+
+        if lo.startswith("/save"):
+            parts = user_input.split(None, 1)
+            fname = parts[1].strip() if len(parts) > 1 else None
+            _save_conversation(agent, conv_id, fname)
             continue
 
         if lo == "/compact-mode":
