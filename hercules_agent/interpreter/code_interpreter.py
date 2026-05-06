@@ -125,6 +125,7 @@ class PythonInterpreter(BaseInterpreter):
         
         # Create sandbox
         result = ExecutionResult(
+            success=False,
             metadata={
                 "language": "python",
                 "execution_id": str(uuid.uuid4())[:8]

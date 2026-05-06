@@ -30,3 +30,5 @@ discord.py
 mcp
 slack-sdk
 aiofiles
+prompt-toolkit
+rich
