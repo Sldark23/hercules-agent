@@ -975,18 +975,38 @@ async def run_gateway(cfg: dict):
 def main():
     import argparse
 
+    # ── Subcommand alias normalisation ────────────────────────────────────────
+    # Allow bare words as aliases for their --flag equivalents so that:
+    #   hercules onboard   →  hercules --onboard
+    #   hercules gateway   →  hercules --gateway
+    #   hercules update    →  hercules --update  (future-proof)
+    _SUBCOMMAND_ALIASES = {
+        "onboard":     "--onboard",
+        "gateway":     "--gateway",
+        "interactive": "--interactive",
+        "update":      "--update",
+        "compact":     "--compact",
+        "debug":       "--debug",
+        "version":     "--version",
+    }
+    _patched: List[str] = []
+    for _tok in sys.argv[1:]:
+        _patched.append(_SUBCOMMAND_ALIASES.get(_tok, _tok))
+    sys.argv[1:] = _patched
+    # ─────────────────────────────────────────────────────────────────────────
+
     parser = argparse.ArgumentParser(
         description="Hercules — autonomous AI coding agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
               hercules                                   # interactive mode
-              hercules --onboard                         # configure all 22 providers
+              hercules onboard                           # configure all 22 providers
               hercules --provider anthropic              # use Anthropic directly
               hercules --provider groq                   # fast free tier
               hercules --provider xai --model grok-3    # xAI Grok
               hercules --print "fix the failing tests"   # one-shot task
-              hercules --gateway                         # multi-platform bot
+              hercules gateway                           # multi-platform bot
         """),
     )
     parser.add_argument("--version",     action="version", version=f"Hercules v{__version__}")

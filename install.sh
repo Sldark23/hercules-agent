@@ -502,6 +502,24 @@ main() {
     # Handle special modes first
     [[ $DO_UNINSTALL -eq 1 ]] && uninstall
 
+    # ── Auto-detect existing installation ─────────────────────────────────────
+    # If a venv and CLI wrapper already exist and the user did not explicitly
+    # request an action, treat this as an update rather than a fresh install.
+    if [[ $DO_UPDATE -eq 0 && $RUN_ONBOARD -eq 0 && $DO_UNINSTALL -eq 0 ]]; then
+        if [[ -d "$VENV_DIR" && -x "$BIN_DIR/hercules" ]]; then
+            _warn "Existing Hercules installation detected at $INSTALL_DIR"
+            _info "Switching to update mode automatically (pass --onboard to reconfigure providers)."
+            echo ""
+            DO_UPDATE=1
+        fi
+    fi
+
+    if [[ $DO_UPDATE -eq 1 ]]; then
+        do_update
+        # do_update calls exit 0 — nothing below runs
+    fi
+    # ─────────────────────────────────────────────────────────────────────────
+
     check_python
     check_pip
     check_git
@@ -520,7 +538,7 @@ main() {
         prompt_onboard
     fi
 
-    [[ $DO_UPDATE -eq 0 ]] && print_success
+    print_success
 }
 
 main "$@"
