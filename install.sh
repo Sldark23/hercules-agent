@@ -25,7 +25,7 @@ CONFIG_DIR="$INSTALL_DIR/config"
 DATA_DIR="$INSTALL_DIR/data"
 
 # Default repo — override with HERCULES_REPO env var or --repo flag
-HERCULES_REPO="${HERCULES_REPO:-https://github.com/your-org/hercules-agent}"
+HERCULES_REPO="${HERCULES_REPO:-https://github.com/Sldark23/hercules-agent}"
 HERCULES_BRANCH="${HERCULES_BRANCH:-main}"
 
 # Directory that contains install.sh (= repo root when cloned)
