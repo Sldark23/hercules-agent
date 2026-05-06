@@ -57,6 +57,9 @@ from hercules_agent.core.react_agent import (
     EventKind, ReactAgent, ReactAgentConfig, StreamEvent,
 )
 from hercules_agent.tools.builtin_tools import get_todos
+from hercules_agent.providers.registry import (
+    REGISTRY, PROVIDER_NAMES, is_configured, resolve_credentials,
+)
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -322,6 +325,8 @@ def _print_help():
     cmds = [
         ("/help",             "Show this help"),
         ("/tools",            "List available tools (16 built-in)"),
+        ("/providers",        "Show all 22 providers and their status"),
+        ("/onboard",          "Interactive wizard — configure all providers"),
         ("/todos",            "Show current task list"),
         ("/sessions",         "List recent conversations"),
         ("/save [file]",      "Save conversation to markdown file"),
@@ -331,7 +336,7 @@ def _print_help():
         ("/history",          "Show recent conversation"),
         ("/cost",             "Show session token usage & cost"),
         ("/model <name>",     "Switch LLM model"),
-        ("/provider <name>",  "Switch provider (openrouter|anthropic|openai|groq|ollama…)"),
+        ("/provider <name>",  "Switch provider  (22 supported — see /providers)"),
         ("/new",              "Start a fresh conversation"),
         ("/compact-mode",     "Toggle compact tool output"),
         ("/debug",            "Toggle debug logging"),
@@ -352,6 +357,239 @@ def _print_tools():
         icon = _TOOL_ICONS.get(fn["name"], "⚙")
         t.add_row(f"{icon} {fn['name']}", fn["description"].split("\n")[0][:90])
     console.print(Panel(t, title="[bold yellow]Built-in Tools[/bold yellow]", box=box.ROUNDED))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Provider listing helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _print_providers():
+    """Display all registered providers and their configuration status."""
+    t = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
+    t.add_column("#",           style="dim",    no_wrap=True, width=3)
+    t.add_column("Provider",    style="bold",   no_wrap=True)
+    t.add_column("Status",      no_wrap=True,   width=12)
+    t.add_column("Default Model", style="dim",  no_wrap=True)
+    t.add_column("Description")
+    for i, (name, info) in enumerate(REGISTRY.items(), 1):
+        ok = is_configured(name)
+        status = "[bold green]✓ ready[/bold green]" if ok else "[dim]○ no key[/dim]"
+        if info.free_tier and not ok:
+            status = "[yellow]○ free tier[/yellow]"
+        t.add_row(str(i), info.label, status, info.default_model, info.description)
+    console.print(Panel(
+        t,
+        title="[bold cyan]Hercules Providers[/bold cyan]  [dim]22 total[/dim]",
+        box=box.ROUNDED,
+    ))
+    console.print("[dim]  Run [cyan]/onboard[/cyan] to configure any provider interactively.[/dim]\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Onboard wizard
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _determine_env_file() -> str:
+    """Find the best .env file path to write keys into."""
+    hercules_home = os.environ.get("HERCULES_HOME", os.path.expanduser("~/.hercules"))
+    candidates = [
+        os.path.join(hercules_home, ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+def _write_env_key(env_file: str, var_name: str, value: str):
+    """Upsert KEY=value in an .env file."""
+    os.makedirs(os.path.dirname(os.path.abspath(env_file)), exist_ok=True)
+    lines: list[str] = []
+    if os.path.exists(env_file):
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    found = False
+    for i, line in enumerate(lines):
+        stripped = line.lstrip("# ")
+        if stripped.startswith(f"{var_name}="):
+            lines[i] = f"{var_name}={value}\n"
+            found = True
+            break
+    if not found:
+        lines.append(f"{var_name}={value}\n")
+
+    with open(env_file, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+async def _test_provider(provider_name: str, api_key: str) -> bool:
+    """Quick smoke-test: ask the model for a one-word answer. Returns True if OK."""
+    import litellm
+    from hercules_agent.providers.registry import litellm_model as _lm, REGISTRY
+    info = REGISTRY[provider_name]
+    model = _lm(provider_name, info.default_model)
+    kwargs: dict = {
+        "model":      model,
+        "messages":   [{"role": "user", "content": "Reply with the single word: OK"}],
+        "max_tokens": 10,
+        "stream":     False,
+    }
+    if api_key:
+        kwargs["api_key"] = api_key
+    if info.base_url:
+        kwargs["base_url"] = info.base_url
+    try:
+        resp = await litellm.acompletion(**kwargs)
+        txt = (resp.choices[0].message.content or "").strip()
+        return len(txt) > 0
+    except Exception:
+        return False
+
+
+async def run_onboard(non_interactive: bool = False):
+    """Full interactive onboarding wizard — configures all providers."""
+    from rich.prompt import Prompt, Confirm
+
+    console.print()
+    console.print(Panel(
+        "[bold cyan]Welcome to Hercules Onboard[/bold cyan]\n\n"
+        "This wizard will walk you through configuring every provider.\n"
+        "Keys are saved to your [cyan].env[/cyan] file and loaded automatically on next launch.\n\n"
+        "[dim]Press Enter to skip any provider. Type [bold]q[/bold] to quit at any time.[/dim]",
+        title="[bold]⚡ Hercules Setup[/bold]",
+        box=box.ROUNDED,
+    ))
+    console.print()
+
+    env_file = _determine_env_file()
+    console.print(f"[dim]Writing configuration to: [cyan]{env_file}[/cyan][/dim]\n")
+
+    # ── Show provider table ───────────────────────────────────────────────────
+    _print_providers()
+
+    configured_providers: list[str] = []
+    default_provider: Optional[str] = None
+    default_model: Optional[str] = None
+
+    # ── Walk through each provider ────────────────────────────────────────────
+    for name, info in REGISTRY.items():
+        already = is_configured(name)
+
+        # Skip providers that need no key
+        if not info.env_var:
+            console.print(f"  [green]✓[/green] [bold]{info.label}[/bold] — no API key needed (local)")
+            configured_providers.append(name)
+            continue
+
+        status = "[green]already configured[/green]" if already else "[dim]not set[/dim]"
+        console.print(
+            f"\n[bold cyan]{info.label}[/bold cyan]  {status}\n"
+            f"  [dim]{info.description}[/dim]\n"
+            f"  [dim]Get a key → {info.signup_url}[/dim]"
+        )
+        if info.notes:
+            console.print(f"  [yellow]Note:[/yellow] [dim]{info.notes}[/dim]")
+        if info.free_tier:
+            console.print("  [yellow]★ Free tier available[/yellow]")
+
+        # Prompt for key (hidden)
+        prompt_label = f"  {info.env_var}"
+        if already:
+            prompt_label += " (Enter to keep existing, or paste new key)"
+        else:
+            prompt_label += " (Enter to skip)"
+
+        try:
+            import getpass
+            raw = getpass.getpass(prompt=f"\n{prompt_label}: ") if not non_interactive else ""
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Onboard cancelled.[/dim]")
+            return
+
+        if raw.lower() == "q":
+            console.print("[dim]Onboard cancelled.[/dim]")
+            return
+
+        if not raw.strip():
+            if already:
+                console.print(f"  [dim]Keeping existing {info.env_var}[/dim]")
+                configured_providers.append(name)
+            else:
+                console.print(f"  [dim]Skipped.[/dim]")
+            continue
+
+        api_key = raw.strip()
+
+        # Test the key
+        console.print(f"  [dim]Testing connection…[/dim]", end="")
+        ok = await _test_provider(name, api_key)
+        if ok:
+            console.print(f"\r  [bold green]✓ Connection verified![/bold green]          ")
+            _write_env_key(env_file, info.env_var, api_key)
+            os.environ[info.env_var] = api_key
+            configured_providers.append(name)
+            if default_provider is None:
+                default_provider = name
+                default_model = info.default_model
+        else:
+            console.print(f"\r  [yellow]⚠ Could not verify key — saving anyway.[/yellow]  ")
+            _write_env_key(env_file, info.env_var, api_key)
+            os.environ[info.env_var] = api_key
+            configured_providers.append(name)
+            if default_provider is None:
+                default_provider = name
+                default_model = info.default_model
+
+    # ── Choose default provider ───────────────────────────────────────────────
+    console.print()
+    console.print(Rule("[bold cyan]Default Provider[/bold cyan]"))
+    console.print()
+
+    if configured_providers:
+        options_str = ", ".join(f"[cyan]{p}[/cyan]" for p in configured_providers)
+        console.print(f"  Configured providers: {options_str}\n")
+        try:
+            chosen = Prompt.ask(
+                "  Default provider",
+                choices=configured_providers,
+                default=default_provider or configured_providers[0],
+            )
+        except (KeyboardInterrupt, EOFError):
+            chosen = default_provider or configured_providers[0]
+
+        info = REGISTRY[chosen]
+        try:
+            chosen_model = Prompt.ask(
+                "  Default model",
+                default=info.default_model,
+            )
+        except (KeyboardInterrupt, EOFError):
+            chosen_model = info.default_model
+
+        _write_env_key(env_file, "HERCULES_DEFAULT_PROVIDER", chosen)
+        _write_env_key(env_file, "HERCULES_DEFAULT_MODEL", chosen_model)
+        os.environ["HERCULES_DEFAULT_PROVIDER"] = chosen
+        os.environ["HERCULES_DEFAULT_MODEL"] = chosen_model
+        default_provider = chosen
+        default_model = chosen_model
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    console.print()
+    summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    summary.add_column("Key", style="dim")
+    summary.add_column("Value", style="cyan")
+    summary.add_row("Configured providers", str(len(configured_providers)))
+    summary.add_row("Default provider", default_provider or "none")
+    summary.add_row("Default model", default_model or "none")
+    summary.add_row("Config file", env_file)
+    console.print(Panel(
+        summary,
+        title="[bold green]✓ Onboard Complete[/bold green]",
+        box=box.ROUNDED,
+    ))
+    console.print("[dim]  Restart Hercules or run [cyan]source .env[/cyan] for keys to take effect.[/dim]\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -449,19 +687,15 @@ async def run_interactive(
     # API key check
     api_key, _ = agent._resolve_credentials()
     if not api_key and provider != "ollama":
-        env_map = {
-            "openrouter": "OPENROUTER_API_KEY",
-            "anthropic":  "ANTHROPIC_API_KEY",
-            "openai":     "OPENAI_API_KEY",
-            "groq":       "GROQ_API_KEY",
-            "gemini":     "GOOGLE_API_KEY",
-            "deepseek":   "DEEPSEEK_API_KEY",
-        }
-        var = env_map.get(provider, "OPENROUTER_API_KEY")
+        pinfo = REGISTRY.get(provider)
+        var    = pinfo.env_var    if pinfo else "OPENROUTER_API_KEY"
+        signup = pinfo.signup_url if pinfo else "https://openrouter.ai/keys"
         console.print(
             Panel(
                 f"[red]No API key found.[/red] Set [yellow]{var}[/yellow] as a Replit Secret or in .env\n"
-                f"Example: [dim]export {var}=sk-...[/dim]",
+                f"Example: [dim]export {var}=sk-...[/dim]\n"
+                f"Get a key at: [dim]{signup}[/dim]\n\n"
+                f"[dim]Tip: type [cyan]/onboard[/cyan] to configure all 22 providers interactively.[/dim]",
                 title="[bold red]⚠ Missing API Key[/bold red]",
                 box=box.ROUNDED,
             )
@@ -542,6 +776,14 @@ async def run_interactive(
 
         if lo == "/sessions":
             _print_sessions(agent)
+            continue
+
+        if lo == "/onboard":
+            await run_onboard()
+            continue
+
+        if lo == "/providers":
+            _print_providers()
             continue
 
         if lo == "/memo":
@@ -738,26 +980,35 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""\
             Examples:
-              hercules                              # interactive mode
-              hercules --provider anthropic         # use Anthropic directly
-              hercules --print "fix the failing tests"
-              hercules --gateway                    # multi-platform bot
+              hercules                                   # interactive mode
+              hercules --onboard                         # configure all 22 providers
+              hercules --provider anthropic              # use Anthropic directly
+              hercules --provider groq                   # fast free tier
+              hercules --provider xai --model grok-3    # xAI Grok
+              hercules --print "fix the failing tests"   # one-shot task
+              hercules --gateway                         # multi-platform bot
         """),
     )
-    parser.add_argument("--version",  action="version", version=f"Hercules v{__version__}")
+    parser.add_argument("--version",     action="version", version=f"Hercules v{__version__}")
     parser.add_argument("--interactive", "-i", action="store_true")
-    parser.add_argument("--gateway",  "-g", action="store_true")
-    parser.add_argument("--print",    "-p", metavar="TASK",
+    parser.add_argument("--onboard",     action="store_true",
+                        help="Run the interactive provider setup wizard, then exit.")
+    parser.add_argument("--gateway",     "-g", action="store_true")
+    parser.add_argument("--print",       "-p", metavar="TASK",
                         help="Run TASK non-interactively and print output, then exit.")
-    parser.add_argument("--model",    "-m", default="anthropic/claude-sonnet-4")
-    parser.add_argument("--provider",       default="openrouter",
-                        choices=["openrouter","anthropic","openai","gemini","groq","deepseek","ollama"])
-    parser.add_argument("--db-path",        default="./data/hercules.db")
-    parser.add_argument("--compact",        action="store_true", help="Compact tool output")
-    parser.add_argument("--debug",          action="store_true")
+    parser.add_argument("--model",       "-m",
+                        default=os.environ.get("HERCULES_DEFAULT_MODEL", "anthropic/claude-sonnet-4"))
+    parser.add_argument("--provider",
+                        default=os.environ.get("HERCULES_DEFAULT_PROVIDER", "openrouter"),
+                        choices=PROVIDER_NAMES)
+    parser.add_argument("--db-path",     default="./data/hercules.db")
+    parser.add_argument("--compact",     action="store_true", help="Compact tool output")
+    parser.add_argument("--debug",       action="store_true")
     args = parser.parse_args()
 
-    if args.gateway:
+    if args.onboard:
+        asyncio.run(run_onboard())
+    elif args.gateway:
         asyncio.run(run_gateway({"model": args.model, "provider": args.provider, "db_path": args.db_path}))
     else:
         asyncio.run(run_interactive(

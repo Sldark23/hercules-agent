@@ -26,6 +26,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 import litellm
 
 from ..tools.builtin_tools import TOOL_SCHEMAS, execute_tool
+from ..providers.registry import resolve_credentials, litellm_model as registry_litellm_model
 from .conversation_store import ConversationStore
 from .token_tracker import SessionTracker, TurnUsage
 
@@ -402,35 +403,10 @@ class ReactAgent:
         return await litellm.acompletion(**kwargs)
 
     def _litellm_model(self) -> str:
-        model = self.config.model
-        provider = self.config.provider.lower()
-        prefix_map = {
-            "openrouter": "openrouter/",
-            "anthropic":  "anthropic/",
-            "openai":     "openai/",
-            "gemini":     "gemini/",
-            "deepseek":   "deepseek/",
-            "groq":       "groq/",
-            "ollama":     "ollama/",
-        }
-        prefix = prefix_map.get(provider, "")
-        if prefix and not model.startswith(prefix):
-            model = prefix + model
-        return model
+        return registry_litellm_model(self.config.provider, self.config.model)
 
     def _resolve_credentials(self) -> Tuple[str, Optional[str]]:
-        provider = self.config.provider.lower()
-        mapping = {
-            "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
-            "anthropic":  ("ANTHROPIC_API_KEY",  None),
-            "openai":     ("OPENAI_API_KEY",      None),
-            "gemini":     ("GOOGLE_API_KEY",      None),
-            "groq":       ("GROQ_API_KEY",        None),
-            "deepseek":   ("DEEPSEEK_API_KEY",    None),
-            "ollama":     ("",                    os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")),
-        }
-        env_var, base_url = mapping.get(provider, ("OPENROUTER_API_KEY", None))
-        return os.getenv(env_var, ""), base_url
+        return resolve_credentials(self.config.provider)
 
     def _build_messages(self, conv_id: str, system_text: str) -> List[Dict[str, Any]]:
         msgs: List[Dict[str, Any]] = [{"role": "system", "content": system_text}]
