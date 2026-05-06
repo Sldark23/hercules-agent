@@ -1,82 +1,64 @@
 # Hercules Agent
-# Modular AI Agent Framework
-
-from hercules_agent.voice.voice_manager import VoiceManager, VoiceConfig
-from hercules_agent.webhooks.webhook_manager import WebhookHandler, WebhookServer, WebhookConfig
-from hercules_agent.cron.cron_scheduler import CronScheduler, CronJob, CronConfig
-from hercules_agent.profiles.profile_manager import ProfileManager, Profile
-from hercules_agent.plugins.plugin_manager import PluginManager, PluginRegistry
-from hercules_agent.compression.context_compressor import ContextCompressor, ConversationManager
-from hercules_agent.browser.browser_manager import Browser, BrowserManager
-from hercules_agent.vision.vision_manager import VisionManager, VisionConfig
-from hercules_agent.multi_agent.multi_agent_manager import MultiAgentManager, AgentOrchestrator
-from hercules_agent.approval.approval_manager import ApprovalManager, ApprovalMiddleware, ApprovalLevel, ApprovalRequest
-from hercules_agent.llm.provider import LLMManager, LLMConfig, ChatMessage, ChatCompletion, LLMProvider
-from hercules_agent.agent_loop.agent_loop import AgentLoop, AgentConfig, AgentState
-from hercules_agent.skills.skill_system import SkillRegistry, SkillDefinition, SkillContext, SkillResult
-
 __version__ = "1.0.0"
 
+# Optional heavy submodules — imported lazily so a broken dependency
+# never prevents `from hercules_agent import __version__` from working.
+def _safe_import(module_path, names):
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        return {name: getattr(mod, name) for name in names if hasattr(mod, name)}
+    except Exception:
+        return {}
+
+_voice       = _safe_import("hercules_agent.voice.voice_manager",            ["VoiceManager", "VoiceConfig"])
+_webhooks    = _safe_import("hercules_agent.webhooks.webhook_manager",        ["WebhookHandler", "WebhookServer", "WebhookConfig"])
+_cron        = _safe_import("hercules_agent.cron.cron_scheduler",             ["CronScheduler", "CronJob", "CronConfig"])
+_profiles    = _safe_import("hercules_agent.profiles.profile_manager",        ["ProfileManager", "Profile"])
+_plugins     = _safe_import("hercules_agent.plugins.plugin_manager",          ["PluginManager", "PluginRegistry"])
+_compression = _safe_import("hercules_agent.compression.context_compressor",  ["ContextCompressor", "ConversationManager"])
+_browser     = _safe_import("hercules_agent.browser.browser_manager",         ["Browser", "BrowserManager"])
+_vision      = _safe_import("hercules_agent.vision.vision_manager",           ["VisionManager", "VisionConfig"])
+_multiagent  = _safe_import("hercules_agent.multi_agent.multi_agent_manager", ["MultiAgentManager", "AgentOrchestrator"])
+_approval    = _safe_import("hercules_agent.approval.approval_manager",       ["ApprovalManager", "ApprovalMiddleware", "ApprovalLevel", "ApprovalRequest"])
+_llm         = _safe_import("hercules_agent.llm.provider",                    ["LLMManager", "LLMConfig", "ChatMessage", "ChatCompletion", "LLMProvider"])
+_agentloop   = _safe_import("hercules_agent.agent_loop.agent_loop",           ["AgentLoop", "AgentConfig", "AgentState"])
+_skills      = _safe_import("hercules_agent.skills.skill_system",             ["SkillRegistry", "SkillDefinition", "SkillContext", "SkillResult"])
+
+# Re-export everything that loaded successfully into the package namespace
+import sys as _sys
+_sys.modules[__name__].__dict__.update(
+    **_voice, **_webhooks, **_cron, **_profiles, **_plugins,
+    **_compression, **_browser, **_vision, **_multiagent, **_approval,
+    **_llm, **_agentloop, **_skills,
+)
+
 __all__ = [
+    "__version__",
     # Voice
-    "VoiceManager",
-    "VoiceConfig",
-    
+    "VoiceManager", "VoiceConfig",
     # Webhooks
-    "WebhookHandler",
-    "WebhookServer",
-    "WebhookConfig",
-    
+    "WebhookHandler", "WebhookServer", "WebhookConfig",
     # Cron
-    "CronScheduler",
-    "CronJob",
-    "CronConfig",
-    
+    "CronScheduler", "CronJob", "CronConfig",
     # Profiles
-    "ProfileManager",
-    "Profile",
-    
+    "ProfileManager", "Profile",
     # Plugins
-    "PluginManager",
-    "PluginRegistry",
-    
+    "PluginManager", "PluginRegistry",
     # Compression
-    "ContextCompressor",
-    "ConversationManager",
-    
+    "ContextCompressor", "ConversationManager",
     # Browser
-    "Browser",
-    "BrowserManager",
-    
+    "Browser", "BrowserManager",
     # Vision
-    "VisionManager",
-    "VisionConfig",
-    
+    "VisionManager", "VisionConfig",
     # Multi-Agent
-    "MultiAgentManager",
-    "AgentOrchestrator",
-    
+    "MultiAgentManager", "AgentOrchestrator",
     # Approval
-    "ApprovalManager",
-    "ApprovalMiddleware",
-    "ApprovalLevel",
-    "ApprovalRequest",
-    
+    "ApprovalManager", "ApprovalMiddleware", "ApprovalLevel", "ApprovalRequest",
     # LLM
-    "LLMManager",
-    "LLMConfig",
-    "ChatMessage",
-    "ChatCompletion",
-    "LLMProvider",
-    
+    "LLMManager", "LLMConfig", "ChatMessage", "ChatCompletion", "LLMProvider",
     # Agent Loop
-    "AgentLoop",
-    "AgentConfig",
-    "AgentState",
-    
+    "AgentLoop", "AgentConfig", "AgentState",
     # Skills
-    "SkillRegistry",
-    "SkillDefinition",
-    "SkillContext",
-    "SkillResult",
+    "SkillRegistry", "SkillDefinition", "SkillContext", "SkillResult",
 ]

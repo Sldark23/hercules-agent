@@ -94,7 +94,7 @@ class AgentExecutor:
     async def execute(
         self,
         agent: SubAgent,
-        executor_fn: Callable[[str, List[str], Optional[Dict]], asyncio.coroutine]
+        executor_fn: Callable[[str, List[str], Optional[Dict]], Any]
     ) -> AgentResult:
         """Execute agent task"""
         start_time = datetime.now()
