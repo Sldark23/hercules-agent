@@ -1,6 +1,7 @@
 # Approval Manager for Hercules Agent
 # Approve/deny dangerous commands with configurable rules
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Callable, Set
 from enum import Enum

@@ -1,6 +1,7 @@
 # Vision module for Hercules Agent
 # Image analysis from messages
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Callable, Union
 from enum import Enum

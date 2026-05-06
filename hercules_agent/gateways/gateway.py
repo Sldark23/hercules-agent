@@ -2,6 +2,7 @@
 Gateway module for Hercules Agent.
 Multi-platform messaging: Telegram, Discord, Slack, WhatsApp, etc.
 """
+from __future__ import annotations
 import os
 import asyncio
 import logging
@@ -113,7 +114,7 @@ class TelegramGateway(Gateway):
     def __init__(self, config: PlatformConfig, agent_controller):
         super().__init__(config, agent_controller)
         self.bot = None
-        self application = None
+        self.application = None
     
     @property
     def platform(self) -> Platform:

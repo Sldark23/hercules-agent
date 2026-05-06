@@ -77,7 +77,7 @@ class TokenCounter:
     def count(self, text: str) -> int:
         """Count tokens in text"""
         encoder = self._get_encoder()
-        return len encoder.encode(text)
+        return len(encoder.encode(text))
     
     def count_messages(self, messages: List[Message]) -> int:
         """Count tokens in messages"""
@@ -219,7 +219,7 @@ class ConversationManager:
         
         # Check if compression needed
         if self.compressor.should_compress(self.messages):
-            # Compression will be done on demand
+            pass  # Compression will be done on demand
     
     async def compress_if_needed(self) -> Optional[CompressionResult]:
         """Compress if threshold reached"""

@@ -692,7 +692,7 @@ async def example():
     
     # Simulate streaming
     async def simulate_stream():
-        for word in ["Hello", " ", "world", "!"):
+        for word in ["Hello", " ", "world", "!"]:
             await stream.send(StreamEvent(
                 type=StreamEventType.CONTENT,
                 data=word
