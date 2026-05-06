@@ -18,7 +18,7 @@ from ..providers.litellm_provider import (
     LLMResponse
 )
 from ..skills.manager import SkillManager, Skill, SkillDefinition
-from ..memory.memory_manager import MemoryManager
+from ..memory.memory_manager import MemoryManager, MemoryConfig
 from ..mcp.mcp_client import MCPServerManager, create_mcp_tools
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,8 @@ class AgentController:
         """Initialize all components"""
         # Memory
         if self.config.enable_memory:
-            self.memory_manager = MemoryManager(self.config.db_path)
+            mem_config = MemoryConfig(storage_path=self.config.db_path)
+            self.memory_manager = MemoryManager(mem_config)
             logger.info("Memory manager initialized")
         
         # Skills
