@@ -1,85 +1,91 @@
 """
-Hercules Agent CLI — Rich terminal interface with streaming, tool visualization,
-and autonomous ReAct loop.
+Hercules Agent CLI — OpenClaw/Hermes-style autonomous agent terminal.
+
+Features:
+  • True token-by-token streaming (no spinner delay)
+  • Thinking blocks shown dim/italic as they arrive
+  • Tool-call panels with syntax-highlighted args and results
+  • Live todo sidebar shown when the agent has active tasks
+  • Token + cost footer after every response
+  • Ctrl+C interrupts in-flight generation gracefully
+  • /compact, /run <task>, /cost, /todos, /model, /provider, /new, /clear
+  • --print mode: run a single task non-interactively and exit
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
-import uuid
+import textwrap
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
 load_dotenv()
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# ── Rich imports ───────────────────────────────────────────────────────────────
+# ── Rich ───────────────────────────────────────────────────────────────────────
+from rich import box
+from rich.columns import Columns
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-from rich.live import Live
-from rich.spinner import Spinner
-from rich.style import Style
-from rich import box
 
-# ── prompt_toolkit for history/completion ──────────────────────────────────────
+# ── prompt_toolkit ─────────────────────────────────────────────────────────────
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.history import FileHistory
     from prompt_toolkit.styles import Style as PTStyle
-    HAS_PROMPT_TOOLKIT = True
+    _HISTORY_FILE = os.path.expanduser("~/.hercules_history")
+    HAS_PT = True
 except ImportError:
-    HAS_PROMPT_TOOLKIT = False
+    HAS_PT = False
 
 from hercules_agent import __version__
-from hercules_agent.core.react_agent import ReactAgent, ReactAgentConfig, ToolCallEvent
+from hercules_agent.core.react_agent import (
+    EventKind, ReactAgent, ReactAgentConfig, StreamEvent,
+)
+from hercules_agent.tools.builtin_tools import get_todos
 
-# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
-console = Console()
+console = Console(highlight=False)
 
-# ── Colour palette ─────────────────────────────────────────────────────────────
-HERCULES_COLOR = "bold cyan"
-USER_COLOR = "bold green"
-TOOL_COLOR = "bold yellow"
-ERROR_COLOR = "bold red"
-DIM = "dim"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # Banner
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
-BANNER = f"""[bold cyan]
-  ██╗  ██╗███████╗██████╗  ██████╗██╗   ██╗██╗     ███████╗███████╗
-  ██║  ██║██╔════╝██╔══██╗██╔════╝██║   ██║██║     ██╔════╝██╔════╝
-  ███████║█████╗  ██████╔╝██║     ██║   ██║██║     █████╗  ███████╗
-  ██╔══██║██╔══╝  ██╔══██╗██║     ██║   ██║██║     ██╔══╝  ╚════██║
-  ██║  ██║███████╗██║  ██║╚██████╗╚██████╔╝███████╗███████╗███████║
-  ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝[/bold cyan]
-[dim]  Autonomous AI Agent  ·  v{__version__}  ·  Type /help for commands[/dim]
+BANNER = """\
+[bold cyan]
+ ██╗  ██╗███████╗██████╗  ██████╗██╗   ██╗██╗     ███████╗███████╗
+ ██║  ██║██╔════╝██╔══██╗██╔════╝██║   ██║██║     ██╔════╝██╔════╝
+ ███████║█████╗  ██████╔╝██║     ██║   ██║██║     █████╗  ███████╗
+ ██╔══██║██╔══╝  ██╔══██╗██║     ██║   ██║██║     ██╔══╝  ╚════██║
+ ██║  ██║███████╗██║  ██║╚██████╗╚██████╔╝███████╗███████╗███████║
+ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝╚══════╝╚══════╝[/bold cyan]
+[dim] Autonomous AI Agent  ·  v{ver}  ·  /help for commands[/dim]
 """
 
 
 def _print_banner(model: str, provider: str):
-    console.print(BANNER)
+    console.print(BANNER.format(ver=__version__))
     console.print(
         Panel(
-            f"[bold]Model:[/bold] [cyan]{model}[/cyan]   "
-            f"[bold]Provider:[/bold] [cyan]{provider}[/cyan]   "
-            f"[bold]CWD:[/bold] [dim]{os.getcwd()}[/dim]",
+            f"[bold]Model:[/bold] [cyan]{escape(model)}[/cyan]   "
+            f"[bold]Provider:[/bold] [cyan]{escape(provider)}[/cyan]   "
+            f"[bold]CWD:[/bold] [dim]{escape(os.getcwd())}[/dim]",
             box=box.ROUNDED,
             style="dim",
             padding=(0, 1),
@@ -88,340 +94,539 @@ def _print_banner(model: str, provider: str):
     console.print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tool call display
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool rendering helpers
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _render_tool_event(event: ToolCallEvent):
-    """Print a compact tool-call block while it runs."""
-    import json as _json
+_TOOL_ICONS = {
+    "shell":       "⚡",
+    "read_file":   "📄",
+    "write_file":  "✏️ ",
+    "patch_file":  "🩹",
+    "list_dir":    "📁",
+    "grep":        "🔍",
+    "python_exec": "🐍",
+    "web_search":  "🌐",
+    "http_get":    "🔗",
+    "todo_write":  "📋",
+    "todo_read":   "📋",
+}
 
-    args_str = _json.dumps(event.tool_args, ensure_ascii=False)
-    if len(args_str) > 200:
-        args_str = args_str[:200] + "…"
+_TOOL_COLORS = {
+    "shell":       "yellow",
+    "read_file":   "blue",
+    "write_file":  "green",
+    "patch_file":  "green",
+    "list_dir":    "blue",
+    "grep":        "magenta",
+    "python_exec": "cyan",
+    "web_search":  "yellow",
+    "http_get":    "yellow",
+    "todo_write":  "bright_white",
+    "todo_read":   "bright_white",
+}
 
-    result_preview = str(event.tool_result)
-    if len(result_preview) > 300:
-        result_preview = result_preview[:300] + "…"
 
-    # Try to pretty-parse JSON result
+def _tool_start_line(name: str, args: dict) -> str:
+    """Single-line summary shown when a tool call begins."""
+    icon = _TOOL_ICONS.get(name, "⚙")
+    color = _TOOL_COLORS.get(name, "yellow")
+    detail = _args_summary(name, args)
+    return f"[{color}]{icon} {name}[/{color}] [dim]{escape(detail)}[/dim]"
+
+
+def _args_summary(name: str, args: dict) -> str:
+    if name == "shell":
+        cmd = args.get("command", "")
+        return cmd[:120] + ("…" if len(cmd) > 120 else "")
+    if name in ("read_file", "write_file", "patch_file"):
+        p = args.get("path", "")
+        extra = ""
+        if name == "patch_file":
+            old = args.get("old_str", "")[:40]
+            extra = f"  ← {old!r}…"
+        return p + extra
+    if name == "web_search":
+        return args.get("query", "")[:80]
+    if name == "http_get":
+        return args.get("url", "")[:80]
+    if name == "python_exec":
+        code = args.get("code", "").split("\n")[0]
+        return code[:80]
+    if name == "grep":
+        return f"/{args.get('pattern','')}/ in {args.get('path','.')}"
+    if name == "list_dir":
+        return args.get("path", ".")
+    if name == "todo_write":
+        todos = args.get("todos", [])
+        return f"{len(todos)} items"
+    return json.dumps(args)[:80]
+
+
+def _render_tool_end(event: StreamEvent, compact: bool):
+    """Print a tool result panel after execution completes."""
+    name   = event.tool_name
+    args   = event.tool_args
+    result = event.tool_result
+    dur    = event.tool_duration
+    color  = _TOOL_COLORS.get(name, "yellow")
+    icon   = _TOOL_ICONS.get(name, "⚙")
+
+    # ── Parse result ──────────────────────────────────────────────────────────
+    result_text = ""
+    is_error = False
     try:
-        parsed = _json.loads(event.tool_result)
+        parsed = json.loads(result)
         if isinstance(parsed, dict):
-            if "stdout" in parsed:
-                result_preview = parsed["stdout"].strip()[:300]
-            elif "error" in parsed:
-                result_preview = f"[red]Error:[/red] {parsed['error']}"
+            if "error" in parsed:
+                result_text = f"[red]Error:[/red] {escape(str(parsed['error']))}"
+                is_error = True
+            elif "stdout" in parsed:
+                result_text = escape(parsed["stdout"].rstrip())
             elif "body" in parsed:
-                result_preview = str(parsed["body"])[:300]
-    except Exception:
-        pass
+                body = str(parsed["body"])
+                result_text = escape(body[:600] + ("…" if len(body) > 600 else ""))
+            elif "success" in parsed and name in ("write_file", "patch_file"):
+                info = parsed.copy()
+                info.pop("success", None)
+                result_text = " · ".join(f"{k}={v}" for k, v in info.items())
+            elif "todos" in parsed:
+                todos = parsed["todos"]
+                lines = []
+                for t in todos:
+                    st = t.get("status", "pending")
+                    sym = {"done": "✓", "in_progress": "→", "pending": "○"}.get(st, "·")
+                    lines.append(f"  {sym} {t.get('content', '')}")
+                result_text = "\n".join(lines)
+            else:
+                result_text = escape(json.dumps(parsed, indent=2)[:400])
+        elif isinstance(parsed, list):
+            result_text = escape(json.dumps(parsed, indent=2)[:400])
+        else:
+            result_text = escape(str(parsed)[:400])
+    except (json.JSONDecodeError, TypeError):
+        result_text = escape(str(result)[:400])
+
+    if compact and not is_error:
+        # Compact mode: just one line
+        snippet = result_text.replace("\n", " ")[:120]
+        console.print(
+            f"  [dim]↳ [{color}]{icon} {name}[/{color}] "
+            f"{escape(_args_summary(name, args))} → {snippet} [{dur:.1f}s][/dim]"
+        )
+        return
+
+    title_str = f"[bold {color}]{icon} {name}[/bold {color}]  [dim]{escape(_args_summary(name, args))}[/dim]  [dim]{dur:.2f}s[/dim]"
+
+    # Shell: try syntax-highlight the command
+    body_renderable = result_text
+    if name == "shell" and not is_error:
+        body_renderable = Text.from_markup(result_text)
 
     console.print(
         Panel(
-            f"[dim]Args:[/dim] [yellow]{args_str}[/yellow]\n"
-            f"[dim]Result:[/dim] {result_preview}\n"
-            f"[dim]({event.duration:.2f}s)[/dim]",
-            title=f"[bold yellow]⚙ {event.tool_name}[/bold yellow]",
-            box=box.SIMPLE,
-            style="yellow",
+            body_renderable,
+            title=title_str,
+            box=box.SIMPLE_HEAD,
+            style=f"dim {color}" if not is_error else "red",
             padding=(0, 1),
         )
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Help text
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Todo sidebar
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _render_todos():
+    todos = get_todos()
+    if not todos:
+        return
+    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
+    table.add_column("", width=2)
+    table.add_column("Task")
+    for t in todos:
+        st = t.get("status", "pending")
+        sym, style = {
+            "done":        ("✓", "dim green"),
+            "in_progress": ("→", "bold yellow"),
+            "pending":     ("○", "dim"),
+        }.get(st, ("·", "dim"))
+        table.add_row(f"[{style}]{sym}[/{style}]", f"[{style}]{escape(t.get('content',''))}[/{style}]")
+    console.print(Panel(table, title="[bold]Tasks[/bold]", box=box.ROUNDED, padding=(0, 1)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Help / tools listing
+# ══════════════════════════════════════════════════════════════════════════════
 
 def _print_help():
-    table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
-    table.add_column("Command", style="cyan bold")
-    table.add_column("Description")
-
+    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    t.add_column("Command", style="cyan bold", no_wrap=True)
+    t.add_column("Description")
     cmds = [
-        ("/help", "Show this help message"),
-        ("/tools", "List available tools"),
-        ("/clear", "Clear conversation history"),
-        ("/history", "Show conversation history"),
-        ("/model <name>", "Switch model (e.g. /model gpt-4o)"),
-        ("/provider <name>", "Switch provider (openrouter | anthropic | openai | groq | ollama)"),
-        ("/new", "Start a new conversation"),
-        ("/debug", "Toggle debug logging"),
-        ("/exit  /quit", "Exit"),
+        ("/help",             "Show this help"),
+        ("/tools",            "List available tools"),
+        ("/todos",            "Show current task list"),
+        ("/clear",            "Clear conversation history"),
+        ("/compact",          "Compress history (keep last 10 messages)"),
+        ("/history",          "Show recent conversation"),
+        ("/cost",             "Show session token usage & cost"),
+        ("/model <name>",     "Switch LLM model"),
+        ("/provider <name>",  "Switch provider (openrouter|anthropic|openai|groq|ollama…)"),
+        ("/new",              "Start a fresh conversation"),
+        ("/compact-mode",     "Toggle compact tool output"),
+        ("/debug",            "Toggle debug logging"),
+        ("/exit  /quit",      "Exit"),
     ]
     for cmd, desc in cmds:
-        table.add_row(cmd, desc)
-
-    console.print(Panel(table, title="[bold cyan]Hercules Commands[/bold cyan]", box=box.ROUNDED))
+        t.add_row(cmd, desc)
+    console.print(Panel(t, title="[bold cyan]Hercules Commands[/bold cyan]", box=box.ROUNDED))
 
 
 def _print_tools():
     from hercules_agent.tools.builtin_tools import TOOL_SCHEMAS
-    table = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
-    table.add_column("Tool", style="yellow bold")
-    table.add_column("Description")
+    t = Table(box=box.SIMPLE, show_header=True, padding=(0, 2))
+    t.add_column("Tool", style="yellow bold")
+    t.add_column("Description")
+    for s in TOOL_SCHEMAS:
+        fn = s["function"]
+        icon = _TOOL_ICONS.get(fn["name"], "⚙")
+        t.add_row(f"{icon} {fn['name']}", fn["description"].split("\n")[0][:90])
+    console.print(Panel(t, title="[bold yellow]Built-in Tools[/bold yellow]", box=box.ROUNDED))
 
-    for schema in TOOL_SCHEMAS:
-        fn = schema["function"]
-        table.add_row(fn["name"], fn["description"].split("\n")[0][:80])
 
-    console.print(Panel(table, title="[bold yellow]Built-in Tools[/bold yellow]", box=box.ROUNDED))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # Core interactive loop
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 async def run_interactive(
     model: str = "anthropic/claude-sonnet-4",
     provider: str = "openrouter",
     db_path: str = "./data/hercules.db",
     debug: bool = False,
+    compact_mode: bool = False,
+    initial_task: Optional[str] = None,  # --print mode
 ):
     if debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
-    config = ReactAgentConfig(
-        model=model,
-        provider=provider,
-        db_path=db_path,
-    )
-    agent = ReactAgent(config)
+    config = ReactAgentConfig(model=model, provider=provider, db_path=db_path)
+    agent  = ReactAgent(config)
     conv_id = agent.new_conversation()
 
-    _print_banner(model, provider)
+    if initial_task is None:
+        _print_banner(model, provider)
 
-    # Detect missing API keys early
+    # API key check
     api_key, _ = agent._resolve_credentials()
     if not api_key and provider != "ollama":
+        env_map = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "anthropic":  "ANTHROPIC_API_KEY",
+            "openai":     "OPENAI_API_KEY",
+            "groq":       "GROQ_API_KEY",
+            "gemini":     "GOOGLE_API_KEY",
+            "deepseek":   "DEEPSEEK_API_KEY",
+        }
+        var = env_map.get(provider, "OPENROUTER_API_KEY")
         console.print(
             Panel(
-                f"[bold red]No API key found for provider '{provider}'.[/bold red]\n\n"
-                f"Set the appropriate environment variable, e.g.:\n"
-                f"  [yellow]OPENROUTER_API_KEY[/yellow] for OpenRouter\n"
-                f"  [yellow]ANTHROPIC_API_KEY[/yellow] for Anthropic\n"
-                f"  [yellow]OPENAI_API_KEY[/yellow] for OpenAI\n"
-                f"  [yellow]GROQ_API_KEY[/yellow] for Groq\n\n"
-                f"You can still type messages, but LLM calls will fail until a key is set.",
+                f"[red]No API key found.[/red] Set [yellow]{var}[/yellow] as a Replit Secret or in .env\n"
+                f"Example: [dim]export {var}=sk-...[/dim]",
                 title="[bold red]⚠ Missing API Key[/bold red]",
                 box=box.ROUNDED,
             )
         )
 
-    # Set up prompt_toolkit session (or fallback)
-    if HAS_PROMPT_TOOLKIT:
-        pt_style = PTStyle.from_dict({"prompt": "bold ansicyan"})
+    # prompt_toolkit session
+    if HAS_PT and initial_task is None:
+        _pt_style = PTStyle.from_dict({"prompt": "bold ansicyan"})
         session: PromptSession = PromptSession(
-            history=InMemoryHistory(),
+            history=FileHistory(_HISTORY_FILE),
             auto_suggest=AutoSuggestFromHistory(),
-            style=pt_style,
+            style=_pt_style,
         )
 
-    debug_mode = debug
+    debug_mode    = debug
+    _compact_mode = compact_mode
 
     async def _get_input() -> str:
-        if HAS_PROMPT_TOOLKIT:
-            try:
-                return await session.prompt_async("You ❯ ")
-            except (EOFError, KeyboardInterrupt):
-                raise KeyboardInterrupt
-        else:
-            return input("You ❯ ")
+        if HAS_PT:
+            return await session.prompt_async("You ❯ ")
+        return input("You ❯ ")
 
+    # ── Non-interactive (--print) mode ─────────────────────────────────────────
+    if initial_task is not None:
+        await _run_turn(agent, conv_id, initial_task, _compact_mode)
+        return
+
+    # ── Interactive REPL ───────────────────────────────────────────────────────
     while True:
         try:
-            user_input = await _get_input()
-        except KeyboardInterrupt:
+            user_input = (await _get_input()).strip()
+        except (KeyboardInterrupt, EOFError):
             console.print("\n[dim]Goodbye![/dim]")
             break
-        except EOFError:
-            break
 
-        user_input = user_input.strip()
         if not user_input:
             continue
 
-        # ── Built-in commands ──────────────────────────────────────────────────
-        if user_input.lower() in ("/exit", "/quit", "exit", "quit"):
+        lo = user_input.lower()
+
+        if lo in ("/exit", "/quit", "exit", "quit"):
             console.print("[dim]Goodbye![/dim]")
             break
 
-        if user_input == "/help":
-            _print_help()
-            continue
+        if lo == "/help":            _print_help();      continue
+        if lo == "/tools":           _print_tools();     continue
+        if lo == "/todos":           _render_todos();    continue
 
-        if user_input == "/tools":
-            _print_tools()
-            continue
-
-        if user_input == "/clear":
+        if lo == "/clear":
             agent.clear_history(conv_id)
-            console.print("[dim]Conversation history cleared.[/dim]")
+            console.print("[dim]History cleared.[/dim]")
             continue
 
-        if user_input == "/history":
-            console.print(
-                Panel(
-                    agent.get_history_text(conv_id),
-                    title="[bold]Conversation History[/bold]",
-                    box=box.SIMPLE,
-                )
-            )
+        if lo == "/compact":
+            removed = agent.compact_history(conv_id)
+            console.print(f"[dim]Compacted history: removed {removed} older messages.[/dim]")
             continue
 
-        if user_input == "/new":
+        if lo == "/history":
+            console.print(Panel(
+                agent.get_history_text(conv_id),
+                title="[bold]Conversation History[/bold]", box=box.SIMPLE,
+            ))
+            continue
+
+        if lo == "/cost":
+            t = agent.tracker
+            console.print(Panel(
+                t.summary_line(),
+                title="[bold]Session Cost[/bold]", box=box.SIMPLE,
+            ))
+            continue
+
+        if lo == "/new":
             conv_id = agent.new_conversation()
-            console.print(f"[dim]New conversation started: {conv_id}[/dim]")
+            console.print(f"[dim]New conversation: {conv_id}[/dim]")
             continue
 
-        if user_input == "/debug":
+        if lo == "/compact-mode":
+            _compact_mode = not _compact_mode
+            console.print(f"[dim]Compact tool output: {'ON' if _compact_mode else 'OFF'}[/dim]")
+            continue
+
+        if lo == "/debug":
             debug_mode = not debug_mode
-            level = logging.DEBUG if debug_mode else logging.WARNING
-            logging.getLogger().setLevel(level)
-            console.print(f"[dim]Debug logging {'ON' if debug_mode else 'OFF'}.[/dim]")
+            logging.getLogger().setLevel(logging.DEBUG if debug_mode else logging.WARNING)
+            console.print(f"[dim]Debug: {'ON' if debug_mode else 'OFF'}[/dim]")
             continue
 
-        if user_input.startswith("/model "):
-            new_model = user_input[7:].strip()
-            if new_model:
-                agent.config.model = new_model
-                console.print(f"[dim]Model switched to [cyan]{new_model}[/cyan].[/dim]")
+        if lo.startswith("/model "):
+            agent.config.model = user_input[7:].strip()
+            console.print(f"[dim]Model → [cyan]{agent.config.model}[/cyan][/dim]")
             continue
 
-        if user_input.startswith("/provider "):
-            new_provider = user_input[10:].strip()
-            if new_provider:
-                agent.config.provider = new_provider
-                agent._api_key, agent._base_url = agent._resolve_credentials()
-                console.print(f"[dim]Provider switched to [cyan]{new_provider}[/cyan].[/dim]")
+        if lo.startswith("/provider "):
+            agent.config.provider = user_input[10:].strip()
+            agent._api_key, agent._base_url = agent._resolve_credentials()
+            console.print(f"[dim]Provider → [cyan]{agent.config.provider}[/cyan][/dim]")
             continue
 
-        # ── Send to agent ──────────────────────────────────────────────────────
-        console.print()
+        if lo.startswith("/run "):
+            task = user_input[5:].strip()
+            if task:
+                await _run_turn(agent, conv_id, task, _compact_mode)
+            continue
 
-        # Spinner while thinking
-        thinking_done = asyncio.Event()
-        full_response_parts: list = []
+        # Normal message
+        await _run_turn(agent, conv_id, user_input, _compact_mode, debug_mode)
 
-        async def on_tool(event: ToolCallEvent):
-            _render_tool_event(event)
 
-        # We show a spinner initially, then switch to streaming text
-        console.print(Rule(style="dim"))
+# ══════════════════════════════════════════════════════════════════════════════
+# Single turn renderer
+# ══════════════════════════════════════════════════════════════════════════════
 
-        response_text = ""
-        try:
-            spinner_text = Text()
-            with Live(
-                Spinner("dots", text=Text("Hercules is thinking…", style="dim")),
-                console=console,
-                refresh_per_second=10,
-                transient=True,
-            ):
-                # Collect the full response (the stream internally does the
-                # ReAct loop; tool calls are shown via on_tool callback)
-                async for chunk in agent.stream(conv_id, user_input, on_tool=on_tool):
-                    response_text += chunk
+async def _run_turn(
+    agent: ReactAgent,
+    conv_id: str,
+    user_message: str,
+    compact: bool = False,
+    debug: bool = False,
+):
+    """Execute one agent turn and render all events to the terminal."""
+    console.print()
+    console.print(Rule(style="dim"))
 
-        except Exception as exc:
-            console.print(
-                Panel(
-                    f"[red]{exc}[/red]",
-                    title="[bold red]Error[/bold red]",
-                    box=box.ROUNDED,
+    # We accumulate the full response text so we can render it as Markdown at the end
+    response_parts: List[str] = []
+    in_thinking = False        # are we currently inside a <thinking> block?
+    thinking_parts: List[str] = []
+    tool_count   = 0
+    start_time   = time.monotonic()
+
+    # ── Set up interrupt handler ───────────────────────────────────────────────
+    loop = asyncio.get_event_loop()
+
+    def _sigint_handler():
+        agent.interrupt()
+        console.print("\n[dim yellow]Interrupting…[/dim yellow]")
+
+    try:
+        loop.add_signal_handler(__import__("signal").SIGINT, _sigint_handler)
+    except (NotImplementedError, OSError):
+        pass  # Windows / no signal support
+
+    # ── Print label ───────────────────────────────────────────────────────────
+    console.print(f"[bold cyan]Hercules[/bold cyan] [dim]({agent.config.model})[/dim]")
+    console.print()
+
+    try:
+        async for event in agent.run(conv_id, user_message):
+
+            if event.kind == EventKind.THINKING:
+                # Dim italic, no newline (stream as-is)
+                sys.stdout.write(f"\033[2m\033[3m{event.text}\033[0m")
+                sys.stdout.flush()
+                thinking_parts.append(event.text)
+
+            elif event.kind == EventKind.TEXT:
+                # Regular text — stream directly
+                sys.stdout.write(event.text)
+                sys.stdout.flush()
+                response_parts.append(event.text)
+
+            elif event.kind == EventKind.TOOL_START:
+                # End any streaming text with a newline before showing tool
+                if response_parts or thinking_parts:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    response_parts = []
+                    thinking_parts = []
+                console.print(_tool_start_line(event.tool_name, event.tool_args))
+                tool_count += 1
+
+            elif event.kind == EventKind.TOOL_END:
+                _render_tool_end(event, compact)
+                # Show updated todos automatically after todo_write
+                if event.tool_name == "todo_write" and not compact:
+                    _render_todos()
+
+            elif event.kind == EventKind.USAGE:
+                if event.usage:
+                    elapsed = time.monotonic() - start_time
+                    line = agent.tracker.turn_line(event.usage)
+                    console.print(
+                        f"\n[dim]  ⏱ {elapsed:.1f}s  ·  {line}[/dim]"
+                    )
+
+            elif event.kind == EventKind.ERROR:
+                console.print(
+                    Panel(f"[red]{escape(event.text)}[/red]",
+                          title="[bold red]Error[/bold red]", box=box.ROUNDED)
                 )
-            )
-            if debug_mode:
-                import traceback
-                console.print_exception()
-            continue
+                if debug:
+                    console.print_exception()
 
-        # Render the final response as Markdown
-        console.print()
+            elif event.kind == EventKind.DONE:
+                # Flush any remaining streamed text
+                if response_parts:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        console.print("[dim yellow]Interrupted.[/dim yellow]")
+    except Exception as exc:
+        console.print(
+            Panel(f"[red]{escape(str(exc))}[/red]",
+                  title="[bold red]Error[/bold red]", box=box.ROUNDED)
+        )
+        if debug:
+            console.print_exception()
+    finally:
+        # Restore default SIGINT
         try:
-            md = Markdown(response_text)
-            console.print(
-                Panel(md, title="[bold cyan]Hercules[/bold cyan]", box=box.ROUNDED, padding=(1, 2))
-            )
-        except Exception:
-            console.print(
-                Panel(
-                    response_text,
-                    title="[bold cyan]Hercules[/bold cyan]",
-                    box=box.ROUNDED,
-                    padding=(1, 2),
-                )
-            )
-        console.print()
+            loop.add_signal_handler(__import__("signal").SIGINT, lambda: None)
+        except (NotImplementedError, OSError):
+            pass
+        agent.reset_interrupt()
+
+    console.print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Gateway mode (unchanged, delegates to existing gateway code)
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Gateway mode
+# ══════════════════════════════════════════════════════════════════════════════
 
-async def run_gateway(agent_config_dict: dict):
-    """Run as multi-platform gateway (Telegram / Discord / Slack)."""
+async def run_gateway(cfg: dict):
     from hercules_agent.core.agent_controller import AgentController, AgentConfig
     from hercules_agent.providers.litellm_provider import LLMProvider
     from hercules_agent.gateways.gateway import GatewayManager
 
     config = AgentConfig(
-        default_model=agent_config_dict.get("model", "anthropic/claude-sonnet-4"),
-        default_provider=LLMProvider(agent_config_dict.get("provider", "openrouter")),
-        db_path=agent_config_dict.get("db_path", "./data/hercules.db"),
+        default_model=cfg.get("model", "anthropic/claude-sonnet-4"),
+        default_provider=LLMProvider(cfg.get("provider", "openrouter")),
+        db_path=cfg.get("db_path", "./data/hercules.db"),
     )
-    controller = AgentController(config)
-    await controller.initialize()
-
-    gateway_manager = GatewayManager(controller)
-    await gateway_manager.load_config("./config/platforms.json")
-    await gateway_manager.start_all()
-
+    ctrl = AgentController(config)
+    await ctrl.initialize()
+    gm = GatewayManager(ctrl)
+    await gm.load_config("./config/platforms.json")
+    await gm.start_all()
     console.print(f"[bold cyan]Hercules Gateway v{__version__} started.[/bold cyan]")
     console.print("[dim]Press Ctrl+C to stop.[/dim]")
-
     try:
         while True:
             await asyncio.sleep(60)
     except KeyboardInterrupt:
-        console.print("\n[dim]Stopping gateway…[/dim]")
-        await gateway_manager.stop_all()
+        await gm.stop_all()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 # Entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Hercules Agent CLI")
-    parser.add_argument("--version", action="version", version=f"Hercules Agent v{__version__}")
-    parser.add_argument("--interactive", "-i", action="store_true", help="Run in interactive mode")
-    parser.add_argument("--gateway", "-g", action="store_true", help="Run as gateway (multi-platform)")
-    parser.add_argument("--model", "-m", default="anthropic/claude-sonnet-4", help="LLM model")
-    parser.add_argument("--provider", "-p", default="openrouter", help="LLM provider")
-    parser.add_argument("--db-path", default="./data/hercules.db", help="SQLite database path")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-
+    parser = argparse.ArgumentParser(
+        description="Hercules — autonomous AI coding agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              hercules                              # interactive mode
+              hercules --provider anthropic         # use Anthropic directly
+              hercules --print "fix the failing tests"
+              hercules --gateway                    # multi-platform bot
+        """),
+    )
+    parser.add_argument("--version",  action="version", version=f"Hercules v{__version__}")
+    parser.add_argument("--interactive", "-i", action="store_true")
+    parser.add_argument("--gateway",  "-g", action="store_true")
+    parser.add_argument("--print",    "-p", metavar="TASK",
+                        help="Run TASK non-interactively and print output, then exit.")
+    parser.add_argument("--model",    "-m", default="anthropic/claude-sonnet-4")
+    parser.add_argument("--provider",       default="openrouter",
+                        choices=["openrouter","anthropic","openai","gemini","groq","deepseek","ollama"])
+    parser.add_argument("--db-path",        default="./data/hercules.db")
+    parser.add_argument("--compact",        action="store_true", help="Compact tool output")
+    parser.add_argument("--debug",          action="store_true")
     args = parser.parse_args()
 
     if args.gateway:
-        asyncio.run(run_gateway({
-            "model": args.model,
-            "provider": args.provider,
-            "db_path": args.db_path,
-        }))
+        asyncio.run(run_gateway({"model": args.model, "provider": args.provider, "db_path": args.db_path}))
     else:
-        # Default: interactive
         asyncio.run(run_interactive(
             model=args.model,
             provider=args.provider,
             db_path=args.db_path,
             debug=args.debug,
+            compact_mode=args.compact,
+            initial_task=args.print,
         ))
 
 

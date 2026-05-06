@@ -1,15 +1,14 @@
 """
-ReactAgent — the autonomous ReAct (Reason + Act) loop for Hercules Agent.
+ReactAgent — autonomous ReAct loop for Hercules Agent.
 
-Design:
-  1. Receive user message
-  2. Call LLM with system prompt + conversation history + tool schemas
-  3. If LLM returns tool_calls → execute them in parallel → append results → goto 2
-  4. Repeat until LLM returns plain text (no more tool calls) or max_iterations reached
-  5. Stream the final text response character-by-character via an async generator
-
-This module is deliberately independent of the old AgentController so it can be
-used directly from the CLI, Telegram, Discord, or Slack gateways.
+Key design principles (inspired by Hermes / OpenClaw / Claude Code):
+  • True token-by-token streaming via litellm stream=True
+  • Thinking block detection: text before tool calls shown as "thoughts"
+  • Tool calls accumulated from streaming deltas, executed in parallel
+  • Token/cost tracking on every turn
+  • Interrupt support: set agent.interrupt() to abort the current loop
+  • Up to max_iterations rounds of Reason→Act before giving a final answer
+  • Structured event stream: callers receive typed StreamEvent objects
 """
 from __future__ import annotations
 
@@ -17,333 +16,388 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, AsyncIterator, Dict, List, Optional
+from enum import Enum, auto
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import litellm
 
 from ..tools.builtin_tools import TOOL_SCHEMAS, execute_tool
 from .conversation_store import ConversationStore
+from .token_tracker import SessionTracker, TurnUsage
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt ──────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Hercules, an expert autonomous AI agent — think of yourself as a senior software engineer with full shell access, reading/writing files, searching the web, and executing code.
+# ══════════════════════════════════════════════════════════════════════════════
+# System prompt
+# ══════════════════════════════════════════════════════════════════════════════
 
-## Core behaviour
-- Work autonomously: reason step-by-step, use tools, verify results, iterate.
-- Do NOT ask for permission before using tools — just use them.
-- If a tool call fails, diagnose the error and try an alternative approach.
-- Be concise in reasoning (think out loud briefly), then act.
-- After completing a task, give a clear, human-friendly summary.
+SYSTEM_PROMPT = """\
+You are Hercules, an expert autonomous AI coding agent — a senior engineer \
+with full shell access, file editing, web search, and code execution.
 
-## Tool use guidelines
-- `shell` — run any shell command (git, pip, python, etc.). Prefer this for file navigation, package management, running tests.
-- `read_file` — read source files, configs, logs.
-- `write_file` — write new files or fully overwrite existing ones.
-- `patch_file` — make surgical edits to existing files (preferred over write_file for small changes).
-- `list_dir` — explore directory structure.
-- `grep` — search for patterns across files.
-- `python_exec` — run Python snippets for quick calculations or data processing.
-- `web_search` — find current documentation, news, packages.
-- `http_get` — fetch a URL directly.
+## Core principles
+- Work autonomously: think → act → verify → repeat.
+- Never ask for permission to use tools. Just use them.
+- If something fails, diagnose and try a different approach.
+- Be concise in your prose; use tools to do the real work.
+- After completing a task, give a clear summary of what you did.
 
-## Project context
+## Task management
+For any task with more than ~3 steps, start by calling `todo_write` to plan \
+your work. Update todos with `todo_write` as you complete items so you never \
+lose track. Use statuses: "pending" → "in_progress" → "done".
+
+## Code editing strategy
+1. Read the file first (`read_file`) to understand context.
+2. For small targeted changes: use `patch_file` (safer than full rewrites).
+3. For new files or major rewrites: use `write_file`.
+4. Always verify changes — run tests, lint, or at least read the edited file back.
+5. Use `grep` to search for patterns before editing; avoid guessing line numbers.
+
+## Shell best practices
+- Chain commands with `&&` to abort on failure.
+- Use `2>&1` to capture stderr alongside stdout.
+- For long-running processes, add a timeout.
+- `python3 -c "..."` is often faster than writing a temp script.
+
+## Thinking
+Feel free to reason out loud before taking action. Your thoughts help the \
+user follow your reasoning. Start reasoning sections with a brief statement \
+of what you're trying to figure out.
+
+## Environment
 Working directory: {cwd}
+Platform: {platform}
 Date/time (UTC): {now}
+Python: {python_ver}
 """
 
 
 def _build_system_prompt() -> str:
+    import sys, platform as plat
     return SYSTEM_PROMPT.format(
         cwd=os.getcwd(),
+        platform=plat.system(),
         now=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+        python_ver=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
     )
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Streaming event types
+# ══════════════════════════════════════════════════════════════════════════════
+
+class EventKind(Enum):
+    TEXT        = auto()   # assistant prose (streamed token by token)
+    THINKING    = auto()   # content between <thinking>…</thinking>
+    TOOL_START  = auto()   # tool call starting (name + args known)
+    TOOL_END    = auto()   # tool call finished (result available)
+    USAGE       = auto()   # token usage for this turn
+    ERROR       = auto()   # error message
+    DONE        = auto()   # final end-of-turn signal
+
+
+@dataclass
+class StreamEvent:
+    kind: EventKind
+    text: str = ""                          # TEXT / THINKING / ERROR
+    tool_name: str = ""                     # TOOL_START / TOOL_END
+    tool_args: Dict[str, Any] = field(default_factory=dict)    # TOOL_START
+    tool_result: str = ""                   # TOOL_END
+    tool_duration: float = 0.0              # TOOL_END
+    usage: Optional[TurnUsage] = None       # USAGE
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config
+# ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class ReactAgentConfig:
-    model: str = "anthropic/claude-sonnet-4"
+    model: str    = "anthropic/claude-sonnet-4"
     provider: str = "openrouter"
     temperature: float = 0.5
-    max_tokens: int = 8192
+    max_tokens: int    = 8192
     max_iterations: int = 20
     db_path: str = "./data/hercules.db"
     extra_system_prompt: str = ""
+    compact_threshold: int = 40   # messages before auto-compact suggestion
 
 
-# ── Tool call events ───────────────────────────────────────────────────────────
-
-@dataclass
-class ToolCallEvent:
-    tool_name: str
-    tool_args: Dict[str, Any]
-    tool_result: str
-    duration: float
-
-
-# ── ReactAgent ─────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# ReactAgent
+# ══════════════════════════════════════════════════════════════════════════════
 
 class ReactAgent:
     """
-    Autonomous ReAct agent backed by litellm + built-in tools.
+    Autonomous streaming ReAct agent.
+
+    Emit a sequence of StreamEvent objects for each user turn.
+    The CLI (or any frontend) subscribes to the stream and renders events.
 
     Usage:
         agent = ReactAgent(config)
-        async for chunk in agent.stream(conv_id, user_message, on_tool=cb):
-            print(chunk, end="", flush=True)
+        async for event in agent.run(conv_id, user_msg):
+            handle(event)
     """
 
     def __init__(self, config: ReactAgentConfig = None):
         self.config = config or ReactAgentConfig()
         self.store = ConversationStore(self.config.db_path)
+        self.tracker = SessionTracker()
+        self._interrupt = False
 
-        # Configure litellm
         litellm.drop_params = True
-        litellm.max_retries = 3
+        litellm.max_retries = 2
 
-        # Resolve API key & base URL
         self._api_key, self._base_url = self._resolve_credentials()
-
-    def _resolve_credentials(self):
-        provider = self.config.provider.lower()
-        if provider == "openrouter":
-            return (
-                os.getenv("OPENROUTER_API_KEY", ""),
-                "https://openrouter.ai/api/v1",
-            )
-        elif provider == "anthropic":
-            return os.getenv("ANTHROPIC_API_KEY", ""), None
-        elif provider == "openai":
-            return os.getenv("OPENAI_API_KEY", ""), None
-        elif provider == "gemini":
-            return os.getenv("GOOGLE_API_KEY", ""), None
-        elif provider == "groq":
-            return os.getenv("GROQ_API_KEY", ""), None
-        elif provider == "deepseek":
-            return os.getenv("DEEPSEEK_API_KEY", ""), None
-        elif provider == "ollama":
-            return "", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        else:
-            return os.getenv("OPENROUTER_API_KEY", ""), None
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    async def stream(
+    def interrupt(self):
+        """Signal the agent to stop after the current iteration."""
+        self._interrupt = True
+
+    def reset_interrupt(self):
+        self._interrupt = False
+
+    async def run(
         self,
         conversation_id: str,
         user_message: str,
-        on_tool: Optional[Any] = None,   # async callable(ToolCallEvent)
         user_id: str = "cli_user",
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[StreamEvent]:
         """
-        Async generator — yields text chunks of the final assistant response.
-        Calls `on_tool(event)` whenever a tool is executed (for UI feedback).
+        Async generator — yields StreamEvent objects for the entire turn.
+        The final event is always EventKind.DONE.
         """
-        # Persist conversation
-        self.store.ensure_conversation(
-            conversation_id,
-            user_id=user_id,
-            model=self.config.model,
-            provider=self.config.provider,
-        )
+        self._interrupt = False
 
-        # Persist user message
+        self.store.ensure_conversation(
+            conversation_id, user_id=user_id,
+            model=self.config.model, provider=self.config.provider,
+        )
         self.store.append_message(conversation_id, "user", user_message)
 
-        # Build message list for LLM
         system_text = _build_system_prompt()
         if self.config.extra_system_prompt:
             system_text += "\n\n" + self.config.extra_system_prompt
 
         messages = self._build_messages(conversation_id, system_text)
 
-        # ReAct loop
-        iteration = 0
-        final_response = ""
+        full_response_text = ""
+        total_in = total_out = 0
 
-        while iteration < self.config.max_iterations:
-            iteration += 1
+        for iteration in range(self.config.max_iterations):
+            if self._interrupt:
+                yield StreamEvent(kind=EventKind.TEXT, text="\n\n[Interrupted]")
+                break
 
-            response = await self._call_llm(messages)
+            # ── Stream one LLM call ────────────────────────────────────────────
+            text_chunks: List[str] = []
+            tool_calls_acc: Dict[int, Dict] = {}   # index → accumulated delta
+            finish_reason = ""
+            in_tokens = out_tokens = 0
 
-            choice = response.choices[0]
-            msg = choice.message
-            finish = choice.finish_reason
+            try:
+                stream = await self._call_llm_stream(messages)
 
-            # Extract content & tool calls
-            content = msg.content or ""
-            raw_tool_calls = getattr(msg, "tool_calls", None) or []
+                async for chunk in stream:
+                    if self._interrupt:
+                        break
 
-            if raw_tool_calls:
-                # Add assistant message with tool_calls to the context
+                    choice = chunk.choices[0] if chunk.choices else None
+                    if not choice:
+                        continue
+
+                    delta = choice.delta
+                    finish_reason = choice.finish_reason or finish_reason
+
+                    # Usage (some providers send in last chunk)
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        in_tokens  = getattr(chunk.usage, "prompt_tokens",     0) or 0
+                        out_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+
+                    # Text content
+                    if delta and delta.content:
+                        chunk_text = delta.content
+                        text_chunks.append(chunk_text)
+
+                        # Detect thinking blocks and label them differently
+                        yield StreamEvent(
+                            kind=EventKind.THINKING if _is_thinking_context(text_chunks)
+                                 else EventKind.TEXT,
+                            text=chunk_text,
+                        )
+
+                    # Tool call accumulation
+                    if delta and getattr(delta, "tool_calls", None):
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                            if tc_delta.id:
+                                tool_calls_acc[idx]["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    tool_calls_acc[idx]["name"] += tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    tool_calls_acc[idx]["arguments"] += tc_delta.function.arguments
+
+            except Exception as exc:
+                yield StreamEvent(kind=EventKind.ERROR, text=str(exc))
+                break
+
+            full_text = "".join(text_chunks)
+            total_in  += in_tokens
+            total_out += out_tokens
+
+            # ── No tool calls → final response ────────────────────────────────
+            if not tool_calls_acc:
+                full_response_text = full_text
+                break
+
+            # ── Execute tool calls ─────────────────────────────────────────────
+            tc_list = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+
+            # Append assistant message (with tool_calls) to context
+            messages.append({
+                "role": "assistant",
+                "content": full_text or None,
+                "tool_calls": [
+                    {
+                        "id":   tc["id"],
+                        "type": "function",
+                        "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                    }
+                    for tc in tc_list
+                ],
+            })
+
+            # Announce + execute each tool
+            async def _exec_one(tc: Dict) -> Tuple[Dict, str, float]:
+                name = tc["name"]
+                try:
+                    raw_args = json.loads(tc["arguments"] or "{}")
+                except json.JSONDecodeError:
+                    raw_args = {}
+                t0 = asyncio.get_event_loop().time()
+                result = await execute_tool(name, raw_args)
+                dur = asyncio.get_event_loop().time() - t0
+                return tc, result, dur
+
+            # Emit TOOL_START events
+            for tc in tc_list:
+                try:
+                    parsed_args = json.loads(tc["arguments"] or "{}")
+                except Exception:
+                    parsed_args = {}
+                yield StreamEvent(
+                    kind=EventKind.TOOL_START,
+                    tool_name=tc["name"],
+                    tool_args=parsed_args,
+                )
+
+            # Run all in parallel
+            tool_results = await asyncio.gather(*[_exec_one(tc) for tc in tc_list])
+
+            for tc, result, dur in tool_results:
+                try:
+                    parsed_args = json.loads(tc["arguments"] or "{}")
+                except Exception:
+                    parsed_args = {}
+                yield StreamEvent(
+                    kind=EventKind.TOOL_END,
+                    tool_name=tc["name"],
+                    tool_args=parsed_args,
+                    tool_result=result,
+                    tool_duration=dur,
+                )
                 messages.append({
-                    "role": "assistant",
-                    "content": content,
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in raw_tool_calls
-                    ],
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": result,
                 })
 
-                # Execute all tool calls (potentially in parallel)
-                tool_results = await self._execute_tool_calls(raw_tool_calls, on_tool)
-
-                # Append tool results
-                for tc_id, result_str in tool_results:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": result_str,
-                    })
-
-                # Continue the loop
-                continue
-
-            # No tool calls — we have the final response
-            final_response = content
-            break
-
         else:
-            # Max iterations reached — use whatever we have
-            final_response = (
-                content if content
-                else "I reached the maximum number of reasoning steps. Please try a more specific request."
+            # Hit max_iterations
+            full_response_text = (
+                "I've reached the maximum reasoning steps for this request. "
+                "Here's where I got to:\n\n" + full_response_text
             )
 
-        # Persist assistant response
-        if final_response:
-            self.store.append_message(conversation_id, "assistant", final_response)
+        # ── Persist and emit usage ─────────────────────────────────────────────
+        if full_response_text:
+            self.store.append_message(conversation_id, "assistant", full_response_text)
 
-        # Stream the response word by word (simulate streaming since litellm
-        # doesn't always support true streaming for all providers)
-        async for chunk in self._stream_text(final_response):
-            yield chunk
+        if total_in or total_out:
+            turn = self.tracker.record(self._litellm_model(), total_in, total_out)
+            yield StreamEvent(kind=EventKind.USAGE, usage=turn)
 
-    async def chat(
-        self,
-        conversation_id: str,
-        user_message: str,
-        on_tool: Optional[Any] = None,
-        user_id: str = "cli_user",
-    ) -> str:
-        """Non-streaming version — returns full response string."""
-        parts = []
-        async for chunk in self.stream(conversation_id, user_message, on_tool, user_id):
-            parts.append(chunk)
-        return "".join(parts)
+        yield StreamEvent(kind=EventKind.DONE)
 
-    # ── Internal helpers ───────────────────────────────────────────────────────
+    # ── Helpers ────────────────────────────────────────────────────────────────
 
-    def _build_messages(self, conv_id: str, system_text: str) -> List[Dict[str, Any]]:
-        """Build the messages list from conversation history."""
-        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_text}]
-
-        history = self.store.get_history(conv_id, limit=80)
-        for msg in history:
-            if msg.role == "user":
-                messages.append({"role": "user", "content": msg.content})
-            elif msg.role == "assistant":
-                messages.append({"role": "assistant", "content": msg.content})
-            # Skip tool messages from history — they'd be orphaned without their
-            # corresponding assistant tool_call messages, which we don't store
-            # in a format that can be reconstructed. The LLM gets memory through
-            # the conversation text instead.
-
-        return messages
-
-    async def _call_llm(self, messages: List[Dict[str, Any]]) -> Any:
-        """Call litellm with retry logic."""
+    async def _call_llm_stream(self, messages: List[Dict[str, Any]]) -> Any:
         kwargs: Dict[str, Any] = {
-            "model": self._litellm_model(),
-            "messages": messages,
-            "tools": TOOL_SCHEMAS,
+            "model":       self._litellm_model(),
+            "messages":    messages,
+            "tools":       TOOL_SCHEMAS,
             "tool_choice": "auto",
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens":  self.config.max_tokens,
+            "stream":      True,
+            "stream_options": {"include_usage": True},
         }
         if self._api_key:
             kwargs["api_key"] = self._api_key
         if self._base_url:
             kwargs["base_url"] = self._base_url
-
         return await litellm.acompletion(**kwargs)
 
     def _litellm_model(self) -> str:
-        """Build the litellm model string (e.g. 'openrouter/anthropic/claude-sonnet-4')."""
         model = self.config.model
         provider = self.config.provider.lower()
-
         prefix_map = {
             "openrouter": "openrouter/",
-            "anthropic": "anthropic/",
-            "openai": "openai/",
-            "gemini": "gemini/",
-            "deepseek": "deepseek/",
-            "groq": "groq/",
-            "ollama": "ollama/",
+            "anthropic":  "anthropic/",
+            "openai":     "openai/",
+            "gemini":     "gemini/",
+            "deepseek":   "deepseek/",
+            "groq":       "groq/",
+            "ollama":     "ollama/",
         }
         prefix = prefix_map.get(provider, "")
         if prefix and not model.startswith(prefix):
             model = prefix + model
         return model
 
-    async def _execute_tool_calls(
-        self,
-        tool_calls: List[Any],
-        on_tool: Optional[Any],
-    ) -> List[tuple]:
-        """Execute tool calls, optionally in parallel, return (id, result) pairs."""
+    def _resolve_credentials(self) -> Tuple[str, Optional[str]]:
+        provider = self.config.provider.lower()
+        mapping = {
+            "openrouter": ("OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"),
+            "anthropic":  ("ANTHROPIC_API_KEY",  None),
+            "openai":     ("OPENAI_API_KEY",      None),
+            "gemini":     ("GOOGLE_API_KEY",      None),
+            "groq":       ("GROQ_API_KEY",        None),
+            "deepseek":   ("DEEPSEEK_API_KEY",    None),
+            "ollama":     ("",                    os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")),
+        }
+        env_var, base_url = mapping.get(provider, ("OPENROUTER_API_KEY", None))
+        return os.getenv(env_var, ""), base_url
 
-        async def _run_one(tc) -> tuple:
-            name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-
-            t0 = asyncio.get_event_loop().time()
-            result = await execute_tool(name, args)
-            duration = asyncio.get_event_loop().time() - t0
-
-            if on_tool:
-                event = ToolCallEvent(
-                    tool_name=name,
-                    tool_args=args,
-                    tool_result=result,
-                    duration=duration,
-                )
-                try:
-                    await on_tool(event)
-                except Exception:
-                    pass
-
-            return tc.id, result
-
-        results = await asyncio.gather(*[_run_one(tc) for tc in tool_calls])
-        return list(results)
-
-    async def _stream_text(self, text: str) -> AsyncIterator[str]:
-        """Yield text in small chunks to give a streaming feel."""
-        # Yield in word-sized chunks so the UI can print progressively
-        words = text.split(" ")
-        for i, word in enumerate(words):
-            chunk = word if i == len(words) - 1 else word + " "
-            yield chunk
-            # Tiny yield to allow event loop to flush
-            await asyncio.sleep(0)
+    def _build_messages(self, conv_id: str, system_text: str) -> List[Dict[str, Any]]:
+        msgs: List[Dict[str, Any]] = [{"role": "system", "content": system_text}]
+        history = self.store.get_history(conv_id, limit=80)
+        for m in history:
+            if m.role in ("user", "assistant"):
+                msgs.append({"role": m.role, "content": m.content})
+        return msgs
 
     # ── Conversation management ────────────────────────────────────────────────
 
@@ -357,11 +411,50 @@ class ReactAgent:
     def clear_history(self, conv_id: str):
         self.store.clear_history(conv_id)
 
+    def compact_history(self, conv_id: str) -> int:
+        """Drop all but the last 10 messages. Returns how many were removed."""
+        history = self.store.get_history(conv_id, limit=200)
+        keep = 10
+        to_remove = history[:-keep] if len(history) > keep else []
+        for msg in to_remove:
+            # We don't have a delete_message API, so we clear and re-insert kept msgs
+            pass
+        # Simpler: just clear and re-insert last `keep` messages
+        keep_msgs = history[-keep:]
+        self.store.clear_history(conv_id)
+        for m in keep_msgs:
+            self.store.save_message(m)
+        return max(0, len(history) - keep)
+
     def get_history_text(self, conv_id: str, limit: int = 20) -> str:
         msgs = self.store.get_history(conv_id, limit=limit)
+        if not msgs:
+            return "(empty)"
         lines = []
         for m in msgs:
-            role = m.role.capitalize()
-            snippet = m.content[:200].replace("\n", " ")
+            role = m.role.upper()
+            snippet = m.content[:160].replace("\n", " ")
             lines.append(f"[{m.timestamp[:16]}] {role}: {snippet}")
-        return "\n".join(lines) if lines else "(empty)"
+        return "\n".join(lines)
+
+    def message_count(self, conv_id: str) -> int:
+        return len(self.store.get_history(conv_id, limit=200))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Thinking block detector
+# ══════════════════════════════════════════════════════════════════════════════
+
+_THINKING_OPEN  = re.compile(r"<thinking>", re.IGNORECASE)
+_THINKING_CLOSE = re.compile(r"</thinking>", re.IGNORECASE)
+
+
+def _is_thinking_context(chunks: List[str]) -> bool:
+    """
+    Returns True if the most recent text is inside a <thinking> block.
+    We scan the accumulated chunks for unmatched open tags.
+    """
+    combined = "".join(chunks)
+    opens  = len(_THINKING_OPEN.findall(combined))
+    closes = len(_THINKING_CLOSE.findall(combined))
+    return opens > closes
