@@ -601,36 +601,37 @@ class ResponseBuilder:
 
 # ==================== FastAPI Integration ====================
 
-if True:
+try:
     # Optional FastAPI integration
     from typing import Optional
     from fastapi import APIRouter, Request, Response
     from fastapi.responses import StreamingResponse as FASStreamingResponse
-    
+    HAS_FASTAPI = True
+
     router = APIRouter()
-    
+
     @router.get("/stream")
     async def stream_endpoint(request: Request):
         """SSE stream endpoint"""
         async def event_generator():
             queue = asyncio.Queue()
-            
+
             async def sse_wrapper(event: StreamEvent):
                 await queue.put(event)
-            
+
             handler = CallbackStream(sse_wrapper)
-            
+
             # (Would connect to actual stream source)
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                    
+
                     yield f"event: {event.type.value}\n"
                     yield f"data: {json.dumps(event.data)}\n\n"
-                    
+
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
-    
+
     # FastAPI response helper
     async def streaming_response(
         handler: StreamHandler,
@@ -638,18 +639,17 @@ if True:
     ) -> FASStreamingResponse:
         """Create FastAPI streaming response"""
         async def generator():
-            buffer = []
-            
             while handler.is_active():
                 await asyncio.sleep(0.01)
-                
                 # (Would get events from handler)
-                # yield formatted_sse_event
-        
+
         return FASStreamingResponse(
             generator(),
             media_type=media_type
         )
+
+except ImportError:
+    HAS_FASTAPI = False
 
 
 # ==================== Utility Functions ====================

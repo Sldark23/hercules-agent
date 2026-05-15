@@ -629,7 +629,7 @@ if HAS_SQLALCHEMY:
         id = Column(String, primary_key=True)
         agent_id = Column(String, nullable=False)
         user_id = Column(String)
-        metadata = Column(JSON)
+        session_metadata = Column(JSON)
         started_at = Column(DateTime, default=datetime.now)
         ended_at = Column(DateTime)
     

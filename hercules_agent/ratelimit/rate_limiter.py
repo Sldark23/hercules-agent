@@ -12,7 +12,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from abc import ABC, abstractmethod
 import hashlib
-import redis.asyncio as redis
+try:
+    import redis.asyncio as redis
+    HAS_REDIS = True
+except ImportError:
+    redis = None  # type: ignore
+    HAS_REDIS = False
 
 logger = logging.getLogger(__name__)
 
