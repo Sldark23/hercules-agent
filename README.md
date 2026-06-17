@@ -24,7 +24,10 @@ node install.js
 ### Windows
 
 ```powershell
-# PowerShell
+# One-liner (PowerShell)
+irm https://hermes-agent.nousresearch.com/install.ps1 | iex
+
+# Or download and run
 powershell -ExecutionPolicy Bypass -File install.ps1
 
 # Or via Node.js
