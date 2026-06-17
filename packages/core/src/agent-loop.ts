@@ -141,6 +141,8 @@ export class AgentLoop {
         .every(m => !m.toolCalls?.some(tc => tc.name === t.name))
     })
 
+    const streaming = this.config.streaming ?? false
+
     const request: ModelRequest = {
       model: this.config.modelId,
       messages: state.messages.slice(-20).map(m => ({
@@ -151,7 +153,8 @@ export class AgentLoop {
       tools: toolsForModel.length > 0 ? toolsForModel : undefined,
       maxTokens: 4096,
       temperature: 0.7,
-      streaming: false,
+      streaming,
+      onDelta: streaming ? (delta) => { this.emit({ type: 'text_delta', delta }) } : undefined,
       thinking: this.thinkingLevel,
       signal: this.abortController.signal,
     }

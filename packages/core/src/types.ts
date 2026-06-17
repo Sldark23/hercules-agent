@@ -92,6 +92,7 @@ export interface ModelRequest {
   maxTokens?: number
   temperature?: number
   streaming?: boolean
+  onDelta?: (delta: string) => void
   thinking?: ThinkingLevel
   signal?: AbortSignal
 }
@@ -193,6 +194,7 @@ export interface AgentConfig {
   maxTurns: number
   userId?: string
   workspaceDir: string
+  streaming?: boolean
 }
 
 export interface AgentTurnResult {

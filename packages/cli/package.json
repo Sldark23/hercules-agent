@@ -1,6 +1,6 @@
 {
   "name": "@hercules/cli",
-  "version": "0.1.0",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
   "dependencies": {
     "@hercules/core": "workspace:*",
     "@hercules/gateway": "workspace:*",
+    "@hercules/tools": "workspace:*",
     "commander": "^13.0.0"
   },
   "devDependencies": {

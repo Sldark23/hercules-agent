@@ -1,4 +1,4 @@
-import type { ModelConfig, ModelRequest, ModelResponse, ProviderConfig, ProviderId, ThinkingLevel, TokenUsage } from './types.js'
+import type { ModelConfig, ModelRequest, ModelResponse, ProviderConfig, ProviderId, ThinkingLevel, TokenUsage, ToolCall } from './types.js'
 import { CredentialPool } from './credential-pool.js'
 
 export interface ModelRouterConfig {
@@ -585,7 +585,7 @@ export class ModelRouter {
         ...(request.system ? [{ role: 'system', content: request.system }] : []),
         ...request.messages,
       ],
-      stream: false,
+      stream: request.streaming ?? false,
       options: {
         temperature: request.temperature ?? 0.7,
         num_predict: request.maxTokens ?? 4096,
@@ -600,6 +600,11 @@ export class ModelRouter {
     })
 
     if (!res.ok) throw new Error(`Ollama error: ${res.status} ${await res.text()}`)
+
+    if (request.streaming && request.onDelta) {
+      return this.handleOllamaStream(res, model.id, request.onDelta, request.signal)
+    }
+
     const data = (await res.json()) as Record<string, unknown>
 
     return {
@@ -633,8 +638,146 @@ export class ModelRouter {
     })
 
     if (!res.ok) throw new Error(`${model.provider} API error: ${res.status} ${await res.text()}`)
+
+    if (request.streaming && request.onDelta) {
+      return this.handleOpenAIStream(res, model.id, request.onDelta, request.signal)
+    }
+
     const data = (await res.json()) as Record<string, unknown>
     return this.parseOpenAIResponse(data, model.id)
+  }
+
+  private async handleOpenAIStream(
+    res: Response,
+    modelId: string,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal
+  ): Promise<ModelResponse> {
+    const reader = res.body?.getReader()
+    if (!reader) throw new Error('Response body not readable')
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let content = ''
+    let finishReason: ModelResponse['finishReason'] = 'stop'
+    let responseId = crypto.randomUUID() as string
+    let toolCalls: ToolCall[] | undefined
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done || signal?.aborted) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || !trimmed.startsWith('data: ')) continue
+          const payload = trimmed.slice(6)
+          if (payload === '[DONE]') break
+
+          try {
+            const chunk = JSON.parse(payload) as Record<string, unknown>
+            if (chunk.id) responseId = chunk.id as string
+
+            const choices = chunk.choices as Array<Record<string, unknown>> | undefined
+            if (!choices?.length) continue
+
+            const choice = choices[0]!
+            if (choice.finish_reason) {
+              finishReason = choice.finish_reason as ModelResponse['finishReason']
+            }
+
+            const delta = choice.delta as Record<string, unknown> | undefined
+            if (!delta) continue
+
+            if (typeof delta.content === 'string') {
+              onDelta(delta.content)
+              content += delta.content
+            }
+
+            const tcData = delta.tool_calls as Array<Record<string, unknown>> | undefined
+            if (tcData?.length) {
+              toolCalls = tcData.map(tc => ({
+                id: tc.id as string,
+                name: (tc.function as Record<string, unknown>)?.name as string ?? '',
+                arguments: (() => {
+                  try { return JSON.parse((tc.function as Record<string, unknown>)?.arguments as string) as Record<string, unknown> }
+                  catch { return {} }
+                })(),
+              }))
+            }
+          } catch {}
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    return {
+      id: responseId,
+      content,
+      toolCalls,
+      usage: { input: 0, output: 0 },
+      finishReason,
+      modelId,
+    }
+  }
+
+  private async handleOllamaStream(
+    res: Response,
+    modelId: string,
+    onDelta: (delta: string) => void,
+    signal?: AbortSignal
+  ): Promise<ModelResponse> {
+    const reader = res.body?.getReader()
+    if (!reader) throw new Error('Response body not readable')
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let content = ''
+    let inputTokens = 0
+    let outputTokens = 0
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done || signal?.aborted) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+
+          try {
+            const chunk = JSON.parse(trimmed) as Record<string, unknown>
+            const msg = chunk.message as Record<string, unknown> | undefined
+            if (msg?.content) {
+              const delta = msg.content as string
+              onDelta(delta)
+              content += delta
+            }
+            if (chunk.prompt_eval_count) inputTokens = chunk.prompt_eval_count as number
+            if (chunk.eval_count) outputTokens = chunk.eval_count as number
+          } catch {}
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    return {
+      id: crypto.randomUUID(),
+      content,
+      usage: { input: inputTokens, output: outputTokens },
+      finishReason: 'stop',
+      modelId,
+    }
   }
 
   private buildOpenAIBody(model: ModelConfig, request: ModelRequest): Record<string, unknown> {
@@ -645,7 +788,7 @@ export class ModelRouter {
         ...request.messages,
       ],
       max_tokens: request.maxTokens ?? 4096,
-      stream: false,
+      stream: request.streaming ?? false,
       temperature: request.temperature ?? 0.7,
     }
 

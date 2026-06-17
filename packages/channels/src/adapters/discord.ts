@@ -68,7 +68,7 @@ export class DiscordAdapter implements ChannelAdapter {
     const wsUrl = `${data.url}?v=10&encoding=json`
 
     this.ws = new WebSocket(wsUrl)
-    this.ws.onmessage = (event) => this.handleWS(event.data as string)
+    this.ws.onmessage = (event) => this.handleWS(typeof event.data === 'string' ? event.data : String(event.data))
     this.ws.onclose = () => {
       if (this.running) setTimeout(() => this.connect(), 5000)
     }
@@ -78,13 +78,14 @@ export class DiscordAdapter implements ChannelAdapter {
   private handleWS(raw: string): void {
     try {
       const pkt = JSON.parse(raw) as Record<string, unknown>
-      const op = pkt.op as number
-      const data = pkt.d as Record<string, unknown> | undefined
+      const op = Number(pkt.op)
+      const data = pkt.d
 
-      if (pkt.s) this.seq = pkt.s as number
+      if (typeof pkt.s === 'number') this.seq = pkt.s
 
       if (op === 10) {
-        const heartbeat = (data as Record<string, unknown>).heartbeat_interval as number
+        const d = data as Record<string, unknown> | undefined
+        const heartbeat = Number((d?.heartbeat_interval ?? 0))
         this.ws?.send(JSON.stringify({
           op: 2,
           d: { token: this.token, intents: 1 << 15 | 1 << 9 | 1 << 12, properties: { os: 'linux', browser: 'hercules', device: 'hercules' } },
@@ -94,23 +95,25 @@ export class DiscordAdapter implements ChannelAdapter {
         }, heartbeat)
       }
 
-      if (op === 0 && (pkt.t as string) === 'READY') {
-        this.sessionId = (data as Record<string, unknown>).session_id as string
+      if (op === 0 && pkt.t === 'READY' && data) {
+        const d = data as Record<string, unknown>
+        this.sessionId = typeof d.session_id === 'string' ? d.session_id : null
       }
 
-      if (op === 0 && (pkt.t as string) === 'MESSAGE_CREATE') {
+      if (op === 0 && pkt.t === 'MESSAGE_CREATE') {
         const msg = data as Record<string, unknown> | undefined
-        const author = msg?.author as Record<string, unknown> | undefined
-        if (!msg || author?.bot) return
+        if (!msg) return
+        const author = msg.author as Record<string, unknown> | undefined
+        if (author?.bot) return
 
         const message: ChannelMessage = {
           id: String(msg.id ?? randomUUID()),
           channelId: String(msg.channel_id ?? ''),
           userId: String(author?.id ?? ''),
-          userName: (author?.global_name as string) ?? (author?.username as string) ?? 'unknown',
+          userName: typeof author?.global_name === 'string' ? author.global_name : (typeof author?.username === 'string' ? author.username : 'unknown'),
           text: String(msg.content ?? ''),
-          threadId: (msg.thread as Record<string, unknown> | undefined)?.id as string ?? undefined,
-          timestamp: new Date(msg.timestamp as string).toISOString(),
+          threadId: typeof (msg.thread as Record<string, unknown> | undefined)?.id === 'string' ? (msg.thread as Record<string, unknown>).id as string : undefined,
+          timestamp: new Date(String(msg.timestamp ?? '')).toISOString(),
         }
 
         for (const handler of this.handlers) {

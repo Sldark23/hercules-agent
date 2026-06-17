@@ -1,5 +1,3 @@
-import { z } from 'zod'
-
 export type GuardrailAction = 'allow' | 'block' | 'flag' | 'sanitize'
 
 export interface GuardrailResult {

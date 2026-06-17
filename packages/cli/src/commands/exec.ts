@@ -1,7 +1,8 @@
 import { Command } from 'commander'
-import { AgentLoop, ModelRouter, ContextEngine, CredentialPool } from '@hercules/core'
-import type { AgentConfig } from '@hercules/core'
+import { AgentLoop } from '@hercules/core'
 import { randomUUID } from 'node:crypto'
+import { createBootstrap } from '../bootstrap.js'
+import { logger } from '../logger.js'
 
 export const execCommand = new Command('exec')
   .description('Run a single agent interaction')
@@ -11,14 +12,14 @@ export const execCommand = new Command('exec')
   .option('-t, --max-turns <n>', 'Maximum turns', '5')
   .option('-w, --workspace <dir>', 'Workspace directory', process.cwd())
   .option('-i, --interactive', 'Read input from stdin until EOF')
+  .option('--stream', 'Enable streaming response output')
   .action(async (input, options) => {
     const sessionId = options.session ?? randomUUID()
-    const modelRouter = new ModelRouter(new CredentialPool(), {
+    const { modelRouter, context, toolDefinitions } = await createBootstrap({
       defaultModel: options.model,
-      maxRetries: 3,
+      sessionId,
+      workspaceDir: options.workspace,
     })
-    const context = new ContextEngine({ maxTokens: 200_000 })
-    context.init(sessionId)
 
     const agent = new AgentLoop({
       sessionId,
@@ -28,30 +29,57 @@ export const execCommand = new Command('exec')
         skills: [],
         constraints: ['Be concise and accurate.'],
       },
-      tools: [],
+      tools: toolDefinitions,
       contextConfig: { maxTokens: 200_000, compressionThreshold: 100_000, compressionTarget: 50_000, maxMessages: 100 },
       maxTurns: parseInt(options.maxTurns, 10),
       workspaceDir: options.workspace,
+      streaming: options.stream ?? false,
     }, modelRouter, context)
 
     const processInput = async (text: string) => {
-      console.error(`[hercules] Running (model=${options.model}, session=${sessionId.slice(0, 8)})`)
+      logger.info(`Running (model=${options.model}, session=${sessionId.slice(0, 8)})`)
       const startTime = performance.now()
+
+      if (options.stream) {
+        let buffer = ''
+        agent.on((event) => {
+          if (event.type === 'text_delta') {
+            process.stdout.write(event.delta)
+            buffer += event.delta
+          }
+        })
+        try {
+          const result = await agent.run(text)
+          const elapsed = ((performance.now() - startTime) / 1000).toFixed(2)
+          if (!buffer) {
+            const lastAssistant = [...result.messages].reverse().find(m => m.role === 'assistant')
+            if (lastAssistant?.content) logger.stdout(lastAssistant.content)
+          }
+          process.stdout.write('\n')
+          logger.info(`${elapsed}s (turns: ${result.turns})`, { elapsed, turns: result.turns })
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          logger.error(msg)
+          process.exit(1)
+        }
+        return
+      }
+
       try {
         const result = await agent.run(text)
         const elapsed = ((performance.now() - startTime) / 1000).toFixed(2)
         const lastAssistant = [...result.messages].reverse().find(m => m.role === 'assistant')
         if (lastAssistant?.content) {
-          console.log(lastAssistant.content)
+          logger.stdout(lastAssistant.content)
         } else if (result.error) {
-          console.error(`Error: ${result.error}`)
+          logger.error(result.error)
         } else {
-          console.log('(no response)')
+          logger.stdout('(no response)')
         }
-        console.error(`\n  ─── ${elapsed}s (turns: ${result.turns}) ───`)
+        logger.info(`${elapsed}s (turns: ${result.turns})`, { elapsed, turns: result.turns })
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(`Error: ${msg}`)
+        logger.error(msg)
         process.exit(1)
       }
     }
@@ -65,9 +93,9 @@ export const execCommand = new Command('exec')
       }
       await processInput(chunks.join('').trim())
     } else {
-      console.error('No input provided. Pass as argument or use --interactive for stdin.')
-      console.error('  hercules exec "your prompt"')
-      console.error('  echo "prompt" | hercules exec --interactive')
+      logger.error('No input provided. Pass as argument or use --interactive for stdin.')
+      logger.error('  hercules exec "your prompt"')
+      logger.error('  echo "prompt" | hercules exec --interactive')
       process.exit(1)
     }
   })

@@ -6,10 +6,12 @@ export const shellCommand = new Command('shell')
   .alias('repl')
   .option('-m, --model <id>', 'Model to use', 'gpt-4o')
   .option('-s, --session <id>', 'Session ID (auto-generated if omitted)')
+  .option('--stream', 'Enable streaming response output')
   .action(async (options) => {
     const shell = new HerculesShell({
       model: options.model,
       session: options.session,
+      stream: options.stream ?? false,
     })
     await shell.start()
   })

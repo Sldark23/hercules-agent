@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { SkillRegistry } from './registry.js'
 import { SkillLoader } from './loader.js'
 import { createSkillSandbox, evaluateSkillTrigger, validateSkillTools, buildSkillPrompt } from './sandbox.js'
-import type { SkillInstance, SkillSandbox, SkillsEngineConfig, SkillsActiveSet, SkillState } from './types.js'
+import type { SkillInstance, SkillSandbox, SkillsEngineConfig, SkillsActiveSet } from './types.js'
 import type { SkillInjection } from '@hercules/core'
 
 export class SkillsEngine {

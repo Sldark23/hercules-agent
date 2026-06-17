@@ -47,7 +47,8 @@ export class WhatsAppAdapter implements ChannelAdapter {
       }
     )
     const data = (await res.json()) as Record<string, unknown>
-    const msgId = ((data.messages as Array<Record<string, unknown>>)?.[0])?.id as string ?? ''
+    const msgs = data.messages
+    const msgId = msgs && Array.isArray(msgs) && msgs.length > 0 ? String((msgs[0] as Record<string, unknown>)?.id ?? '') : ''
     return msgId
   }
 
@@ -79,27 +80,34 @@ export class WhatsAppAdapter implements ChannelAdapter {
   }
 
   handleIncomingWebhook(body: Record<string, unknown>): void {
-    const entries = body.entry as Array<Record<string, unknown>> ?? []
+    const entries = body.entry
+    if (!Array.isArray(entries)) return
     for (const entry of entries) {
-      const changes = entry.changes as Array<Record<string, unknown>> ?? []
+      const changes = (entry as Record<string, unknown>).changes
+      if (!Array.isArray(changes)) continue
       for (const change of changes) {
-        const value = change.value as Record<string, unknown> ?? {}
-        const messages = value.messages as Array<Record<string, unknown>> ?? []
-        const contacts = value.contacts as Array<Record<string, unknown>> ?? []
+        const value = (change as Record<string, unknown>).value as Record<string, unknown> | undefined
+        if (!value) continue
+        const messages = value.messages
+        const contacts = value.contacts
+        if (!Array.isArray(messages)) continue
 
         for (const msg of messages) {
-          if (msg.type === 'text') {
-            const contact = contacts[0] as Record<string, unknown> | undefined
-            const profile = contact?.profile as Record<string, unknown> | undefined
-
+          const m = msg as Record<string, unknown>
+          if (m.type === 'text') {
+            const c = Array.isArray(contacts) && contacts.length > 0 ? contacts[0] as Record<string, unknown> : undefined
+            const profile = c?.profile as Record<string, unknown> | undefined
             const valueMeta = value.metadata as Record<string, unknown> | undefined
+
+            const textBody = m.text as Record<string, unknown> | undefined
+
             const message: ChannelMessage = {
-              id: String(msg.id ?? randomUUID()),
-              channelId: String(msg.from ?? valueMeta?.display_phone_number ?? ''),
-              userId: String(msg.from ?? ''),
-              userName: (profile?.name as string) ?? (contact?.wa_id as string) ?? 'unknown',
-              text: (msg.text as Record<string, unknown>)?.body as string ?? '',
-              timestamp: new Date(Number(msg.timestamp) * 1000).toISOString(),
+              id: String(m.id ?? randomUUID()),
+              channelId: String(m.from ?? valueMeta?.display_phone_number ?? ''),
+              userId: String(m.from ?? ''),
+              userName: typeof profile?.name === 'string' ? profile.name : (typeof c?.wa_id === 'string' ? c.wa_id : 'unknown'),
+              text: typeof textBody?.body === 'string' ? textBody.body : '',
+              timestamp: new Date(Number(m.timestamp) * 1000).toISOString(),
             }
 
             for (const handler of this.handlers) {
