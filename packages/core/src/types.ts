@@ -63,7 +63,7 @@ export interface ToolContext {
 
 // ─── Models / Providers ─────────────────────────────────────────────
 
-export type ProviderId = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'mistral' | 'deepseek' | 'groq' | 'xai' | 'cohere' | 'together' | string
+export type ProviderId = 'anthropic' | 'openai' | 'google' | 'openrouter' | 'ollama' | 'mistral' | 'deepseek' | 'groq' | 'xai' | 'cohere' | 'together' | 'perplexity' | 'fireworks' | 'replicate' | 'huggingface' | 'anyscale' | 'azure' | 'github' | 'ai21' | 'octoai' | 'lepton' | 'deepinfra' | 'novita' | 'lambdatest' | string
 
 export interface ModelConfig {
   id: string

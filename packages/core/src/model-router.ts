@@ -6,6 +6,7 @@ export interface ModelRouterConfig {
   defaultModel?: string
   fallbackChain: string[]
   maxRetries: number
+  autoDiscover?: boolean
 }
 
 const PROVIDER_BASE_URLS: Record<string, string> = {
@@ -19,6 +20,19 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
   cohere: 'https://api.cohere.com',
   together: 'https://api.together.xyz',
   openrouter: 'https://openrouter.ai/api',
+  perplexity: 'https://api.perplexity.ai',
+  fireworks: 'https://api.fireworks.ai',
+  replicate: 'https://api.replicate.com',
+  huggingface: 'https://api-inference.huggingface.co',
+  anyscale: 'https://api.endpoints.anyscale.com',
+  github: 'https://models.inference.ai.azure.com',
+  ai21: 'https://api.ai21.com',
+  octoai: 'https://text.octoai.run',
+  lepton: 'https://api.lepton.ai',
+  deepinfra: 'https://api.deepinfra.com',
+  novita: 'https://api.novita.ai',
+  lambdatest: 'https://api.lambdatest.com',
+  azure: 'https://YOUR_RESOURCE.openai.azure.com',
 }
 
 interface NamedAPI {
@@ -70,6 +84,14 @@ function getProviderApi(provider: string, credBaseUrl?: string): NamedAPI {
           documents: body.documents ?? [],
         }),
       }
+    case 'huggingface':
+      return {
+        baseUrl: `${baseUrl}/v1/chat/completions`,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer {{API_KEY}}',
+        },
+      }
     default:
       return {
         baseUrl: `${baseUrl}/v1/chat/completions`,
@@ -81,11 +103,17 @@ function getProviderApi(provider: string, credBaseUrl?: string): NamedAPI {
   }
 }
 
+interface ModelDiscoveryResult {
+  providerId: string
+  models: Array<{ id: string; displayName?: string }>
+}
+
 export class ModelRouter {
   private providers: Map<ProviderId, ProviderConfig> = new Map()
   private modelCache: Map<string, ModelConfig> = new Map()
   private credentialPool: CredentialPool
   private config: ModelRouterConfig
+  private discoverCache: Map<string, ModelDiscoveryResult> = new Map()
 
   constructor(
     credentialPool: CredentialPool,
@@ -95,6 +123,7 @@ export class ModelRouter {
     this.config = {
       fallbackChain: [],
       maxRetries: 2,
+      autoDiscover: false,
       ...config,
     }
   }
@@ -120,6 +149,159 @@ export class ModelRouter {
 
   listProviders(): ProviderConfig[] {
     return Array.from(this.providers.values())
+  }
+
+  /**
+   * Discover available models from a provider's API.
+   * Uses the provider's models endpoint when available.
+   */
+  async discoverProviderModels(
+    providerId: string,
+    apiKey: string,
+    baseUrl?: string
+  ): Promise<ModelDiscoveryResult> {
+    const cacheKey = `${providerId}:${apiKey.slice(0, 8)}`
+    if (this.discoverCache.has(cacheKey)) return this.discoverCache.get(cacheKey)!
+
+    let result: ModelDiscoveryResult = { providerId, models: [] }
+
+    try {
+      switch (providerId) {
+        case 'anthropic': {
+          const url = `${baseUrl ?? PROVIDER_BASE_URLS.anthropic}/v1/models`
+          const res = await fetch(url, {
+            headers: {
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+              'Content-Type': 'application/json',
+            },
+          })
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, unknown>
+            const models = (data.data as Array<Record<string, unknown>>) ?? []
+            result.models = models
+              .filter(m => (m.type as string) === 'model')
+              .map(m => ({ id: m.id as string, displayName: m.display_name as string }))
+          }
+          break
+        }
+        case 'google': {
+          const url = `${baseUrl ?? PROVIDER_BASE_URLS.google}/v1beta/models?key=${apiKey}`
+          const res = await fetch(url)
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, unknown>
+            const models = (data.models as Array<Record<string, unknown>>) ?? []
+            result.models = models
+              .filter(m => (m.supportedGenerationMethods as string[] ?? []).includes('generateContent'))
+              .map(m => ({
+                id: (m.name as string).replace('models/', ''),
+                displayName: m.displayName as string,
+              }))
+          }
+          break
+        }
+        case 'ollama': {
+          const res = await fetch('http://localhost:11434/api/tags')
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, unknown>
+            const models = (data.models as Array<Record<string, unknown>>) ?? []
+            result.models = models.map(m => ({
+              id: (m.name as string).replace(':latest', ''),
+              displayName: m.name as string,
+            }))
+          }
+          break
+        }
+        case 'openrouter': {
+          const url = 'https://openrouter.ai/api/v1/models'
+          const res = await fetch(url)
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, unknown>
+            const models = (data.data as Array<Record<string, unknown>>) ?? []
+            result.models = models.map(m => ({
+              id: m.id as string,
+              displayName: (m.name as string) ?? (m.id as string),
+            }))
+          }
+          break
+        }
+        default: {
+          const url = `${baseUrl ?? PROVIDER_BASE_URLS[providerId] ?? 'https://api.openai.com'}/v1/models`
+          const res = await fetch(url, {
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+          })
+          if (res.ok) {
+            const data = (await res.json()) as Record<string, unknown>
+            const models = (data.data as Array<Record<string, unknown>>) ?? []
+            result.models = models.map(m => ({
+              id: m.id as string,
+              displayName: (m.id as string),
+            }))
+          }
+          break
+        }
+      }
+    } catch {
+      // Discovery failed silently — presets will be used instead
+    }
+
+    this.discoverCache.set(cacheKey, result)
+    return result
+  }
+
+  /**
+   * Auto-register providers with their API keys, discovers models from each API,
+   * and falls back to presets when discovery fails.
+   */
+  async autoConfigure(apiKeys: Record<string, string>): Promise<void> {
+    const presets = createProviderPresets(apiKeys)
+    const discoveryResults: Array<{ id: string; models: ProviderConfig }> = []
+
+    for (const preset of presets) {
+      const apiKey = apiKeys[preset.id]
+      if (!apiKey && preset.id !== 'ollama') continue
+
+      this.credentialPool.register({
+        id: `${preset.id}-auto`,
+        providerId: preset.id,
+        apiKey: apiKey ?? '',
+        isActive: true,
+      })
+
+      if (this.config.autoDiscover && apiKey) {
+        const discovered = await this.discoverProviderModels(preset.id, apiKey, preset.baseUrl)
+        if (discovered.models.length > 0) {
+          const knownIds = new Set(preset.models.map(m => m.id))
+          const newModels = discovered.models
+            .filter(m => !knownIds.has(m.id))
+            .map(m => ({
+              id: m.id,
+              provider: preset.id as ProviderId,
+              displayName: m.displayName ?? m.id,
+              contextWindow: 128000,
+              supportsVision: m.id.includes('vision') || m.id.includes('vision'),
+              supportsStreaming: true,
+              supportsThinking: m.id.includes('reason') || m.id.includes('thinking'),
+              pricing: { inputPerMillion: 0, outputPerMillion: 0 },
+              toolCallFormat: 'native' as const,
+            }))
+          discoveryResults.push({
+            id: preset.id,
+            models: { ...preset, models: [...preset.models, ...newModels] },
+          })
+          continue
+        }
+      }
+
+      discoveryResults.push({ id: preset.id, models: preset })
+    }
+
+    for (const result of discoveryResults) {
+      this.registerProvider(result.models)
+    }
   }
 
   async call(request: ModelRequest): Promise<ModelResponse> {
@@ -159,22 +341,6 @@ export class ModelRouter {
     throw new Error(`All models failed: ${errors.join('; ')}`)
   }
 
-  useProviderDefaults(apiKeys?: Partial<Record<string, string>>): void {
-    const presets = createProviderPresets(apiKeys)
-    for (const preset of presets) {
-      if (this.credentialPool.hasAvailable(preset.id)) continue
-      if (apiKeys?.[preset.id]) {
-        this.credentialPool.register({
-          id: `${preset.id}-default`,
-          providerId: preset.id,
-          apiKey: apiKeys[preset.id]!,
-          isActive: true,
-        })
-      }
-      this.registerProvider(preset)
-    }
-  }
-
   private async callModel(
     modelId: string,
     request: ModelRequest,
@@ -193,6 +359,19 @@ export class ModelRouter {
       case 'mistral':
       case 'together':
       case 'openrouter':
+      case 'perplexity':
+      case 'fireworks':
+      case 'replicate':
+      case 'huggingface':
+      case 'anyscale':
+      case 'github':
+      case 'ai21':
+      case 'octoai':
+      case 'lepton':
+      case 'deepinfra':
+      case 'novita':
+      case 'lambdatest':
+      case 'azure':
         return this.callOpenAICompatible(model, request, cred!)
       case 'google':
         return this.callGoogle(model, request, cred!)
@@ -349,48 +528,6 @@ export class ModelRouter {
     }
   }
 
-  private async callMistral(
-    model: ModelConfig,
-    request: ModelRequest,
-    cred: { apiKey: string; baseUrl?: string }
-  ): Promise<ModelResponse> {
-    const baseUrl = cred.baseUrl ?? PROVIDER_BASE_URLS.mistral
-    const body: Record<string, unknown> = {
-      model: model.id,
-      messages: [
-        ...(request.system ? [{ role: 'system', content: request.system }] : []),
-        ...request.messages,
-      ],
-      max_tokens: request.maxTokens ?? 4096,
-      temperature: request.temperature ?? 0.7,
-    }
-
-    if (request.tools?.length) {
-      body.tools = request.tools.map(t => ({
-        type: 'function',
-        function: {
-          name: t.name,
-          description: t.description,
-          parameters: t.inputSchema,
-        },
-      }))
-    }
-
-    const res = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${cred.apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: request.signal,
-    })
-
-    if (!res.ok) throw new Error(`Mistral API error: ${res.status} ${await res.text()}`)
-    const data = (await res.json()) as Record<string, unknown>
-    return this.parseOpenAIResponse(data, model.id)
-  }
-
   private async callCohere(
     model: ModelConfig,
     request: ModelRequest,
@@ -478,8 +615,9 @@ export class ModelRouter {
     request: ModelRequest,
     cred: { apiKey: string; baseUrl?: string }
   ): Promise<ModelResponse> {
+    const actualBase = cred.baseUrl ?? PROVIDER_BASE_URLS[model.provider]
     const api = getProviderApi(model.provider)
-    const url = `${cred.baseUrl ?? PROVIDER_BASE_URLS[model.provider] ?? api.baseUrl}/v1/chat/completions`
+    const url = `${actualBase ?? api.baseUrl}/v1/chat/completions`
     const body = this.buildOpenAIBody(model, request)
     const headers = this.buildRequestHeaders(model.provider, cred.apiKey)
 
@@ -640,6 +778,108 @@ export function createProviderPresets(apiKeys?: Partial<Record<string, string>>)
       defaultModel: 'meta-llama/Llama-4-Scout-17B-16E-Instruct',
       models: [
         { id: 'meta-llama/Llama-4-Scout-17B-16E-Instruct', provider: 'together', displayName: 'Llama 4 Scout', contextWindow: 1000000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.1, outputPerMillion: 0.1 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'perplexity',
+      baseUrl: PROVIDER_BASE_URLS.perplexity,
+      defaultModel: 'sonar-pro',
+      models: [
+        { id: 'sonar-pro', provider: 'perplexity', displayName: 'Sonar Pro', contextWindow: 200000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 3, outputPerMillion: 15 }, toolCallFormat: 'native' },
+        { id: 'sonar', provider: 'perplexity', displayName: 'Sonar', contextWindow: 127000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 1, outputPerMillion: 5 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'fireworks',
+      baseUrl: PROVIDER_BASE_URLS.fireworks,
+      defaultModel: 'accounts/fireworks/models/llama-v4-scout-17b-16e-instruct',
+      models: [
+        { id: 'accounts/fireworks/models/llama-v4-scout-17b-16e-instruct', provider: 'fireworks', displayName: 'Llama 4 Scout', contextWindow: 1000000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.07, outputPerMillion: 0.07 }, toolCallFormat: 'native' },
+        { id: 'accounts/fireworks/models/deepseek-r1', provider: 'fireworks', displayName: 'DeepSeek R1', contextWindow: 128000, supportsVision: false, supportsStreaming: true, supportsThinking: true, pricing: { inputPerMillion: 0.5, outputPerMillion: 2 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'replicate',
+      baseUrl: PROVIDER_BASE_URLS.replicate,
+      defaultModel: 'meta/meta-llama-3-70b-instruct',
+      models: [
+        { id: 'meta/meta-llama-3-70b-instruct', provider: 'replicate', displayName: 'Llama 3 70B', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.65, outputPerMillion: 2.75 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'huggingface',
+      baseUrl: PROVIDER_BASE_URLS.huggingface,
+      defaultModel: 'meta-llama/Llama-3.3-70B-Instruct',
+      models: [
+        { id: 'meta-llama/Llama-3.3-70B-Instruct', provider: 'huggingface', displayName: 'Llama 3.3 70B', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'anyscale',
+      baseUrl: PROVIDER_BASE_URLS.anyscale,
+      defaultModel: 'meta-llama/Llama-3.3-70B-Instruct',
+      models: [
+        { id: 'meta-llama/Llama-3.3-70B-Instruct', provider: 'anyscale', displayName: 'Llama 3.3 70B', contextWindow: 128000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.45, outputPerMillion: 0.45 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'github',
+      baseUrl: PROVIDER_BASE_URLS.github,
+      defaultModel: 'gpt-4o',
+      models: [
+        { id: 'gpt-4o', provider: 'github', displayName: 'GPT-4o (GitHub)', contextWindow: 128000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+        { id: 'gpt-4o-mini', provider: 'github', displayName: 'GPT-4o Mini (GitHub)', contextWindow: 128000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+        { id: 'o3-mini', provider: 'github', displayName: 'o3 Mini (GitHub)', contextWindow: 200000, supportsVision: false, supportsStreaming: true, supportsThinking: true, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'ai21',
+      baseUrl: PROVIDER_BASE_URLS.ai21,
+      defaultModel: 'jamba-1.6-mini',
+      models: [
+        { id: 'jamba-1.6-mini', provider: 'ai21', displayName: 'Jamba 1.6 Mini', contextWindow: 256000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.2, outputPerMillion: 0.4 }, toolCallFormat: 'native' },
+        { id: 'jamba-1.6-large', provider: 'ai21', displayName: 'Jamba 1.6 Large', contextWindow: 256000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 2, outputPerMillion: 8 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'octoai',
+      baseUrl: PROVIDER_BASE_URLS.octoai,
+      defaultModel: 'meta-llama-3.1-70b-instruct',
+      models: [
+        { id: 'meta-llama-3.1-70b-instruct', provider: 'octoai', displayName: 'Llama 3.1 70B', contextWindow: 128000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.18, outputPerMillion: 0.18 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'lepton',
+      baseUrl: PROVIDER_BASE_URLS.lepton,
+      defaultModel: 'llama3-70b',
+      models: [
+        { id: 'llama3-70b', provider: 'lepton', displayName: 'Llama 3 70B', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.21, outputPerMillion: 0.21 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'deepinfra',
+      baseUrl: PROVIDER_BASE_URLS.deepinfra,
+      defaultModel: 'meta-llama/Llama-3.3-70B-Instruct',
+      models: [
+        { id: 'meta-llama/Llama-3.3-70B-Instruct', provider: 'deepinfra', displayName: 'Llama 3.3 70B', contextWindow: 128000, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.23, outputPerMillion: 0.23 }, toolCallFormat: 'native' },
+        { id: 'deepseek-r1', provider: 'deepinfra', displayName: 'DeepSeek R1', contextWindow: 128000, supportsVision: false, supportsStreaming: true, supportsThinking: true, pricing: { inputPerMillion: 1.3, outputPerMillion: 5.2 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'novita',
+      baseUrl: PROVIDER_BASE_URLS.novita,
+      defaultModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      models: [
+        { id: 'meta-llama/llama-4-scout-17b-16e-instruct', provider: 'novita', displayName: 'Llama 4 Scout', contextWindow: 1000000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.09, outputPerMillion: 0.09 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'lambdatest',
+      baseUrl: PROVIDER_BASE_URLS.lambdatest,
+      defaultModel: 'llama-4-scout-17b-16e-instruct',
+      models: [
+        { id: 'llama-4-scout-17b-16e-instruct', provider: 'lambdatest', displayName: 'Llama 4 Scout', contextWindow: 1000000, supportsVision: true, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0.07, outputPerMillion: 0.07 }, toolCallFormat: 'native' },
       ],
     },
     {

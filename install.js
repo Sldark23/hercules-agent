@@ -15,7 +15,7 @@ const isWindows = platform() === 'win32'
 
 const HERCULES_HOME = process.env.HERCULES_HOME || join(homedir(), '.hercules', 'agent')
 const BIN_DIR = process.env.HERCULES_BIN || join(homedir(), '.hercules', 'bin')
-const GIT_REPO = process.env.HERCULES_REPO || 'https://github.com/your-org/hercules-agent.git'
+const GIT_REPO = process.env.HERCULES_REPO || 'https://github.com/Sldark23/hercules-agent.git'
 const VERSION = '0.1.0'
 
 const BOLD = '\x1b[1m'

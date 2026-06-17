@@ -8,10 +8,10 @@ Hercules Agent is a modular, extensible AI agent runtime that connects to multip
 
 ```bash
 # One-liner (macOS/Linux)
-curl -fsSL https://raw.githubusercontent.com/your-org/hercules-agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Sldark23/hercules-agent/main/install.sh | bash
 
 # Or clone and install manually
-git clone https://github.com/your-org/hercules-agent.git
+git clone https://github.com/Sldark23/hercules-agent.git
 cd hercules-agent
 node install.js
 ```
@@ -59,28 +59,56 @@ hercules config --show     # View config
 hercules status            # System status
 ```
 
-## Supported AI Providers
+## Supported AI Providers (24+)
+
+### Auto-Discovery
+
+Hercules can automatically discover available models from any provider's API.
+Just set your API key and call `autoConfigure()` — the system queries each
+provider's models endpoint and registers all available models automatically.
+
+```
+const router = new ModelRouter(pool, { autoDiscover: true })
+await router.autoConfigure({
+  openai: process.env.OPENAI_API_KEY,
+  anthropic: process.env.ANTHROPIC_API_KEY,
+  // ...any API keys you have
+})
+```
 
 ### Cloud APIs
 
-| Provider | Models | Cost |
-|----------|--------|------|
-| **Anthropic** | Claude Sonnet 4, Opus 4, Haiku 3.5 | From $0.80/M tokens |
-| **OpenAI** | GPT-4o, GPT-4.1, o3-mini, o4-mini | From $0.15/M tokens |
-| **Google** | Gemini 2.5 Flash, Pro | From $0.15/M tokens |
-| **Mistral** | Mistral Large, Small, Codestral | From $0.20/M tokens |
-| **DeepSeek** | DeepSeek V3, R1 | From $0.27/M tokens |
-| **xAI** | Grok 3, Grok 3 Mini | From $0.30/M tokens |
-| **Cohere** | Command A | From $2.50/M tokens |
-| **Together** | Llama 4, and 200+ models | From $0.10/M tokens |
-| **OpenRouter** | Unified access to 300+ models | Pay-as-you-go |
+| Provider | Models | Auth | Cost |
+|----------|--------|------|------|
+| **Anthropic** | Claude Sonnet 4, Opus 4, Haiku 3.5 | API key | From $0.80/M |
+| **OpenAI** | GPT-4o, GPT-4.1, o3-mini, o4-mini | API key | From $0.15/M |
+| **Google** | Gemini 2.5 Flash, Pro | API key | From $0.15/M |
+| **Mistral** | Mistral Large, Small, Codestral | API key | From $0.20/M |
+| **DeepSeek** | DeepSeek V3, R1 | API key | From $0.27/M |
+| **xAI (Grok)** | Grok 3, Grok 3 Mini | API key | From $0.30/M |
+| **Cohere** | Command A | API key | From $2.50/M |
+| **Together** | Llama 4, 200+ models | API key | From $0.10/M |
+| **OpenRouter** | 300+ models unified | API key | Pay-as-you-go |
+| **Perplexity** | Sonar Pro, Sonar | API key | From $1/M |
+| **Fireworks** | Llama 4, DeepSeek R1, 100+ | API key | From $0.07/M |
+| **Replicate** | Llama 3, SD, FLUX | API key | From $0.65/M |
+| **Hugging Face** | 200k+ models | API key | Free tier |
+| **Anyscale** | Llama 3.3 70B, Mixtral | API key | From $0.45/M |
+| **GitHub Models** | GPT-4o, o3-mini (free) | GitHub token | Free |
+| **AI21 Labs** | Jamba 1.6 Mini, Large | API key | From $0.20/M |
+| **OctoAI** | Llama 3.1 70B | API key | From $0.18/M |
+| **Lepton AI** | Llama 3 70B | API key | From $0.21/M |
+| **DeepInfra** | Llama 3.3, DeepSeek R1 | API key | From $0.23/M |
+| **Novita AI** | Llama 4 Scout, 100+ | API key | From $0.09/M |
+| **LambdaTest** | Llama 4 Scout | API key | From $0.07/M |
 
 ### Free / Local
 
 | Provider | Models | Notes |
 |----------|--------|-------|
-| **Groq** | Llama 4 Scout/Maverick, Mixtral, DeepSeek R1 | Free tier available |
-| **Ollama** | Llama 3.2/3.1, Mistral, Qwen 2.5 | Local, no API key needed |
+| **Groq** | Llama 4 Scout/Maverick, Mixtral, DeepSeek R1 | Free tier |
+| **GitHub Models** | GPT-4o, GPT-4o-mini, o3-mini | Free with GH token |
+| **Ollama** | Llama 3.2/3.1, Mistral, Qwen 2.5 | Local, no API key |
 
 ### Configuration
 

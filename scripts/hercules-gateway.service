@@ -1,6 +1,6 @@
 [Unit]
 Description=Hercules Agent Gateway
-Documentation=https://github.com/your-org/hercules-agent
+Documentation=https://github.com/Sldark23/hercules-agent
 After=network.target
 
 [Service]
