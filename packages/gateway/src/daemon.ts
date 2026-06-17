@@ -2,8 +2,8 @@
  * Gateway daemon — runs the GatewayServer persistently.
  * Designed to be invoked by systemd, launchd, or Windows Service Manager.
  */
-import { GatewayServer } from './gateway.js'
-import type { GatewayConfig } from './gateway.js'
+import { GatewayServer } from './server.js'
+import type { GatewayConfig } from './server.js'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -35,7 +35,7 @@ async function main(): Promise<void> {
     host: config.host ?? '0.0.0.0',
     port: config.port ?? 3000,
     authToken: config.authToken,
-    allowedOrigins: config.allowedOrigins ?? ['*'],
+    corsOrigins: config.corsOrigins ?? ['*'],
     ...config,
   })
 

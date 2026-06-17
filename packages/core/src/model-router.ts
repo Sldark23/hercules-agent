@@ -269,6 +269,7 @@ export class ModelRouter {
         providerId: preset.id,
         apiKey: apiKey ?? '',
         isActive: true,
+        failureCount: 0,
       })
 
       if (this.config.autoDiscover && apiKey) {
@@ -559,12 +560,15 @@ export class ModelRouter {
     if (!res.ok) throw new Error(`Cohere API error: ${res.status} ${await res.text()}`)
     const data = (await res.json()) as Record<string, unknown>
 
+    const meta = data.meta as Record<string, unknown> | undefined
+    const billed = meta?.billed_units as Record<string, unknown> | undefined
+
     return {
-      id: data.id as string ?? crypto.randomUUID(),
-      content: (data.text as string) ?? (data.message?.content?.[0]?.text as string) ?? '',
+      id: (data.id as string) ?? crypto.randomUUID(),
+      content: (data.text as string) ?? '',
       usage: {
-        input: (data.meta?.billed_units?.input_tokens as number) ?? 0,
-        output: (data.meta?.billed_units?.output_tokens as number) ?? 0,
+        input: (billed?.input_tokens as number) ?? 0,
+        output: (billed?.output_tokens as number) ?? 0,
       },
       finishReason: (data.finish_reason as ModelResponse['finishReason']) ?? 'stop',
       modelId: model.id,

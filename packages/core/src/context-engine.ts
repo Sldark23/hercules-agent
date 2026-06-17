@@ -86,7 +86,7 @@ export class ContextEngine {
     const messages: Message[] = []
     let total = 0
 
-    for (const msg of state.messages.toReversed()) {
+    for (const msg of [...state.messages].reverse()) {
       const tokens = this.tokenCount(msg.content)
       if (total + tokens > budget) break
       messages.unshift(msg)

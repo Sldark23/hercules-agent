@@ -29,7 +29,7 @@ export const execCommand = new Command('exec')
         constraints: ['Be concise and accurate.'],
       },
       tools: [],
-      contextConfig: { maxTokens: 200_000 },
+      contextConfig: { maxTokens: 200_000, compressionThreshold: 100_000, compressionTarget: 50_000, maxMessages: 100 },
       maxTurns: parseInt(options.maxTurns, 10),
       workspaceDir: options.workspace,
     }, modelRouter, context)

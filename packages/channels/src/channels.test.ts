@@ -32,7 +32,7 @@ describe('ChannelRegistry', () => {
   it('forwards events to global handlers', () => {
     registry.register(new TelegramAdapter('t', 'k'))
     const events: string[] = []
-    registry.on((e) => events.push(e.type))
+    registry.on((e) => { events.push(e.type) })
     const adapter = registry.get('t') as TelegramAdapter
     adapter['handlers'].forEach(h => h({ type: 'message', message: { id: '1', channelId: 'c', userId: 'u', text: 'hi', timestamp: new Date().toISOString() } }))
     expect(events).toContain('message')

@@ -213,7 +213,7 @@ export class McpClient {
         }
       }
 
-      session.process.stdout!.on('data', handler)
+      session.process?.stdout?.on('data', handler)
     })
   }
 

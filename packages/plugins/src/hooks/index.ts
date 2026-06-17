@@ -130,12 +130,12 @@ export class HookSystem {
     if (!handlers) return
 
     await Promise.all(handlers.map(handler =>
-      handler.handler(payload, {
+      Promise.resolve(handler.handler(payload, {
         pluginId: handler.pluginId,
         pluginName: handler.pluginId.split('@')[0]!,
         timestamp: new Date(),
         abort: () => {},
-      }).catch(err => {
+      })).catch((err: unknown) => {
         console.error(`[hooks] Error in "${name}" handler from ${handler.pluginId}:`, err)
       })
     ))

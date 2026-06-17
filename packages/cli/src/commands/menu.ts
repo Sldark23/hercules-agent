@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { createInterface } from 'node:readline/promises'
+import { createInterface, Interface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 
 interface MenuItem {

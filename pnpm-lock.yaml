@@ -42,6 +42,9 @@ importers:
       '@hercules/core':
         specifier: workspace:*
         version: link:../core
+      '@hercules/gateway':
+        specifier: workspace:*
+        version: link:../gateway
       commander:
         specifier: ^13.0.0
         version: 13.1.0
@@ -52,6 +55,9 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.6(@types/node@22.19.21)
 
   packages/core:
     dependencies:
@@ -141,6 +147,9 @@ importers:
       '@hercules/core':
         specifier: workspace:*
         version: link:../core
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^22.0.0
@@ -148,6 +157,9 @@ importers:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
+      vitest:
+        specifier: ^3.0.0
+        version: 3.2.6(@types/node@22.19.21)
 
   packages/skills:
     dependencies:

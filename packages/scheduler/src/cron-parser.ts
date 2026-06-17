@@ -33,13 +33,18 @@ function validateField(field: string, min: number, max: number, name: string): v
 
   for (const segment of segments) {
     if (segment.includes('-')) {
-      const [start, end] = segment.split('-').map(s => parseInt(s.trim(), 10))
-      if (isNaN(start) || isNaN(end)) throw new Error(`Invalid range in cron ${name} field "${field}"`)
+      const parts = segment.split('-').map(s => parseInt(s.trim(), 10))
+      const start = parts[0]
+      const end = parts[1]
+      if (start === undefined || end === undefined || isNaN(start) || isNaN(end)) throw new Error(`Invalid range in cron ${name} field "${field}"`)
       if (start < min || end > max) throw new Error(`Range [${start}-${end}] out of bounds for ${name} field (${min}-${max})`)
     } else if (segment.includes('/')) {
-      const [base, step] = segment.split('/')
+      const parts = segment.split('/')
+      const base = parts[0]
+      const step = parts[1]
+      if (base === undefined) throw new Error(`Invalid step in cron ${name} field "${field}"`)
       validateField(base, min, max, name)
-      if (isNaN(parseInt(step, 10))) throw new Error(`Invalid step in cron ${name} field "${field}"`)
+      if (step === undefined || isNaN(parseInt(step, 10))) throw new Error(`Invalid step in cron ${name} field "${field}"`)
     } else {
       const num = parseInt(segment, 10)
       if (isNaN(num)) throw new Error(`Invalid cron ${name} field "${field}"`)
@@ -65,10 +70,12 @@ function fieldMatches(pattern: string, value: number): boolean {
 
   for (const segment of segments) {
     if (segment.includes('/')) {
-      const [base, stepStr] = segment.split('/')
-      const step = parseInt(stepStr!, 10)
+      const parts = segment.split('/')
+      const base = parts[0]
+      const stepStr = parts[1]
+      const step = parseInt(stepStr ?? '', 10)
       if (isNaN(step)) continue
-      const baseVal = base === '*' ? 0 : rangesMatch(base, value)
+      const baseVal = base === '*' || base === undefined ? 0 : (rangesMatch(base, value) ? value : -1)
       if (baseVal < 0) continue
       if ((value - baseVal) % step === 0) return true
     } else if (rangesMatch(segment, value)) {

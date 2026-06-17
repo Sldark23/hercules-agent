@@ -95,7 +95,7 @@ export const gatewayCommand = new Command('gateway')
           host,
           port,
           authToken: config.authToken as string,
-          allowedOrigins: config.allowedOrigins as string[] ?? ['*'],
+          corsOrigins: config.allowedOrigins as string[] ?? ['*'],
         })
 
         currentServer = server

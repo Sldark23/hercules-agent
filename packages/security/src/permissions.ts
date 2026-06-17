@@ -14,9 +14,12 @@ export class PermissionManager {
   }
 
   defineRole(role: string, scopes: string[]): void {
-    const parsed = scopes.map(s => {
-      const [resource, action] = s.split(':')
-      return { resource: resource === '*' ? '*' : resource, action: (action === '*' ? undefined : action) as PermissionScope['action'] }
+    const parsed: PermissionScope[] = scopes.map(s => {
+      const parts = s.split(':')
+      const resource = parts[0] ?? ''
+      const actionRaw = parts[1]
+      const action: PermissionScope['action'] = (actionRaw === '*' || !actionRaw) ? 'read' : actionRaw as PermissionScope['action']
+      return { resource, action }
     })
     this.permissions.set(`role:${role}`, { id: `role:${role}`, role, scopes: parsed })
   }

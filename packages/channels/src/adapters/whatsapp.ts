@@ -92,9 +92,10 @@ export class WhatsAppAdapter implements ChannelAdapter {
             const contact = contacts[0] as Record<string, unknown> | undefined
             const profile = contact?.profile as Record<string, unknown> | undefined
 
+            const valueMeta = value.metadata as Record<string, unknown> | undefined
             const message: ChannelMessage = {
               id: String(msg.id ?? randomUUID()),
-              channelId: String(msg.from ?? value.metadata?.display_phone_number ?? ''),
+              channelId: String(msg.from ?? valueMeta?.display_phone_number ?? ''),
               userId: String(msg.from ?? ''),
               userName: (profile?.name as string) ?? (contact?.wa_id as string) ?? 'unknown',
               text: (msg.text as Record<string, unknown>)?.body as string ?? '',

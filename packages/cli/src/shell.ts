@@ -106,7 +106,7 @@ export class HerculesShell {
           constraints: ['Be concise and accurate.'],
         },
         tools: [],
-        contextConfig: { maxTokens: 200_000 },
+        contextConfig: { maxTokens: 200_000, compressionThreshold: 100_000, compressionTarget: 50_000, maxMessages: 100 },
         maxTurns: 5,
         workspaceDir: process.cwd(),
       }

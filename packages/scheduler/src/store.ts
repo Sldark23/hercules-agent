@@ -4,6 +4,14 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { CronJob, JobExecution, JobStatus } from './types.js'
 
+function reviveCronJob(raw: Record<string, unknown>): CronJob {
+  return reviveDates(raw) as unknown as CronJob
+}
+
+function reviveJobExec(raw: Record<string, unknown>): JobExecution {
+  return reviveDates(raw) as unknown as JobExecution
+}
+
 export interface JobStoreConfig {
   dbPath: string
 }
@@ -33,12 +41,12 @@ export class JobStore {
 
         if (data.jobs) {
           for (const [id, job] of Object.entries(data.jobs)) {
-            this.jobs.set(id, reviveDates(job as Record<string, unknown>) as CronJob)
+            this.jobs.set(id, reviveCronJob(job as Record<string, unknown>))
           }
         }
         if (data.executions) {
           for (const [id, execs] of Object.entries(data.executions)) {
-            this.executions.set(id, (execs as Record<string, unknown>[]).map(e => reviveDates(e) as JobExecution))
+            this.executions.set(id, (execs as Record<string, unknown>[]).map(e => reviveJobExec(e)))
           }
         }
       } catch {}

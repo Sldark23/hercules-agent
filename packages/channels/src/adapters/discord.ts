@@ -100,16 +100,16 @@ export class DiscordAdapter implements ChannelAdapter {
 
       if (op === 0 && (pkt.t as string) === 'MESSAGE_CREATE') {
         const msg = data as Record<string, unknown> | undefined
-        if (!msg || msg.author?.bot) return
+        const author = msg?.author as Record<string, unknown> | undefined
+        if (!msg || author?.bot) return
 
         const message: ChannelMessage = {
           id: String(msg.id ?? randomUUID()),
           channelId: String(msg.channel_id ?? ''),
-          userId: String((msg.author as Record<string, unknown>)?.id ?? ''),
-          userName: (msg.author as Record<string, unknown>)?.global_name as string
-            ?? (msg.author as Record<string, unknown>)?.username as string ?? 'unknown',
+          userId: String(author?.id ?? ''),
+          userName: (author?.global_name as string) ?? (author?.username as string) ?? 'unknown',
           text: String(msg.content ?? ''),
-          threadId: msg.thread?.id as string ?? undefined,
+          threadId: (msg.thread as Record<string, unknown> | undefined)?.id as string ?? undefined,
           timestamp: new Date(msg.timestamp as string).toISOString(),
         }
 
