@@ -1,5 +1,14 @@
 # @hercules/gateway
 
+## 0.2.2
+
+### Patch Changes
+
+- test: streaming provider coverage, MCP client tests, WebSocket real implementation, fix PermissionManager wildcard
+
+- Updated dependencies []:
+  - @hercules/core@0.2.2
+
 ## 0.2.1
 
 ### Patch Changes

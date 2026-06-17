@@ -18,7 +18,7 @@ export class PermissionManager {
       const parts = s.split(':')
       const resource = parts[0] ?? ''
       const actionRaw = parts[1]
-      const action: PermissionScope['action'] = (actionRaw === '*' || !actionRaw) ? 'read' : actionRaw as PermissionScope['action']
+      const action: PermissionScope['action'] = (actionRaw === '*' || !actionRaw) ? 'admin' : actionRaw as PermissionScope['action']
       return { resource, action }
     })
     this.permissions.set(`role:${role}`, { id: `role:${role}`, role, scopes: parsed })

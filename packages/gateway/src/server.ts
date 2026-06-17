@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomUUID, createHash } from 'node:crypto'
+import type { Socket } from 'node:net'
 
 export interface GatewayConfig {
   host: string
@@ -193,6 +194,60 @@ export interface WebSocketClient {
   onClose(handler: () => void): void
 }
 
+const WS_MAGIC_GUID = '258EAFA5-E914-47DA-95CA-5AB9A1F246B4'
+
+function encodeWsFrame(data: string): Buffer {
+  const payload = Buffer.from(data, 'utf-8')
+  const len = payload.length
+  let header: Buffer
+  if (len < 126) {
+    header = Buffer.alloc(2)
+    header[0] = 0x81
+    header[1] = len
+  } else if (len < 65536) {
+    header = Buffer.alloc(4)
+    header[0] = 0x81
+    header[1] = 126
+    header.writeUInt16BE(len, 2)
+  } else {
+    header = Buffer.alloc(10)
+    header[0] = 0x81
+    header[1] = 127
+    header.writeBigUInt64BE(BigInt(len), 2)
+  }
+  return Buffer.concat([header, payload])
+}
+
+function decodeWsFrame(buffer: Buffer): string | null {
+  if (buffer.length < 2) return null
+  const opcode = buffer[0]! & 0x0f
+  if (opcode === 0x08) return null
+  if (opcode !== 0x01) return null
+  let offset = 2
+  let len = buffer[1]! & 0x7f
+  if (len === 126) {
+    if (buffer.length < 4) return null
+    len = buffer.readUInt16BE(2)
+    offset = 4
+  } else if (len === 127) {
+    if (buffer.length < 10) return null
+    len = Number(buffer.readBigUInt64BE(2))
+    offset = 10
+  }
+  if (buffer.length < offset + len) return null
+  const masked = (buffer[1]! & 0x80) !== 0
+  if (masked) {
+    const mask = buffer.subarray(offset, offset + 4)
+    offset += 4
+    const unmasked = Buffer.alloc(len)
+    for (let i = 0; i < len; i++) {
+      unmasked[i] = buffer[offset + i]! ^ mask[i % 4]!
+    }
+    return unmasked.toString('utf-8')
+  }
+  return buffer.subarray(offset, offset + len).toString('utf-8')
+}
+
 export class SimpleWebSocketServer {
   private server: ReturnType<typeof createServer>
   private clients: Map<string, SimpleWsClient> = new Map()
@@ -203,6 +258,61 @@ export class SimpleWebSocketServer {
     this.gateway = gateway
     this.port = port ?? 18790
     this.server = createServer()
+
+    this.server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
+      const key = req.headers['sec-websocket-key']
+      if (!key) {
+        socket.destroy()
+        return
+      }
+
+      const accept = createHash('sha1')
+        .update(key + WS_MAGIC_GUID)
+        .digest('base64')
+
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+        'Upgrade: websocket\r\n' +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Accept: ${accept}\r\n` +
+        '\r\n'
+      )
+
+      const id = randomUUID()
+      const client = new SimpleWsClient(id, socket)
+      this.clients.set(id, client)
+      this.gateway.addWsClient(id, client)
+
+      socket.on('data', (data: Buffer) => {
+        const msg = decodeWsFrame(data)
+        if (msg === null) {
+          client.close()
+          return
+        }
+        client['onMsg']?.(msg)
+      })
+
+      socket.on('close', () => {
+        client.close()
+        this.clients.delete(id)
+        this.gateway.removeWsClient(id)
+      })
+
+      socket.on('error', () => {
+        client.close()
+        this.clients.delete(id)
+        this.gateway.removeWsClient(id)
+      })
+
+      if (head.length > 0) {
+        const msg = decodeWsFrame(head)
+        if (msg) client['onMsg']?.(msg)
+      }
+    })
+  }
+
+  getClientCount(): number {
+    return this.clients.size
   }
 
   start(): void {
@@ -226,13 +336,38 @@ export class SimpleWebSocketServer {
 class SimpleWsClient {
   id: string
   ready = true
-  private onMsg?: (data: string) => void
+  private socket: Socket
+  onMsg?: (data: string) => void
   private closeHandler?: () => void
 
-  constructor(id: string) { this.id = id }
+  constructor(id: string, socket: Socket) {
+    this.id = id
+    this.socket = socket
+  }
 
-  send(_data: string): void {}
-  close(): void { this.ready = false; this.closeHandler?.() }
+  send(data: string): void {
+    if (!this.ready) return
+    try {
+      this.socket.write(encodeWsFrame(data))
+    } catch {
+      this.close()
+    }
+  }
+
+  close(): void {
+    if (!this.ready) return
+    this.ready = false
+    try {
+      const buf = Buffer.alloc(2)
+      buf[0] = 0x88
+      buf[1] = 0x00
+      this.socket.write(buf)
+    } catch {}
+    this.socket.end()
+    this.closeHandler?.()
+  }
+
   onMessage(handler: (data: string) => void): void { this.onMsg = handler }
+
   onClose(handler: () => void): void { this.closeHandler = handler }
 }

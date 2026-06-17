@@ -17,6 +17,7 @@ const PROVIDER_BASE_URLS: Record<string, string> = {
   deepseek: 'https://api.deepseek.com',
   groq: 'https://api.groq.com',
   xai: 'https://api.x.ai',
+  ollama_cloud: 'https://ollama.com',
   cohere: 'https://api.cohere.com',
   together: 'https://api.together.xyz',
   openrouter: 'https://openrouter.ai/api',
@@ -379,7 +380,9 @@ export class ModelRouter {
       case 'cohere':
         return this.callCohere(model, request, cred!)
       case 'ollama':
-        return this.callOllama(model, request)
+        return this.callOllama(model, request, cred!)
+      case 'ollama_cloud':
+        return this.callOllama(model, request, cred!)
       default:
         return this.callOpenAICompatible(model, request, cred!)
     }
@@ -577,8 +580,12 @@ export class ModelRouter {
 
   private async callOllama(
     model: ModelConfig,
-    request: ModelRequest
+    request: ModelRequest,
+    cred?: { apiKey: string; baseUrl?: string }
   ): Promise<ModelResponse> {
+    const baseUrl = cred?.baseUrl ?? PROVIDER_BASE_URLS[model.provider] ?? 'http://localhost:11434'
+    const url = `${baseUrl}/api/chat`
+
     const body: Record<string, unknown> = {
       model: model.id,
       messages: [
@@ -592,9 +599,12 @@ export class ModelRouter {
       },
     }
 
-    const res = await fetch('http://localhost:11434/api/chat', {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (cred?.apiKey) headers['Authorization'] = `Bearer ${cred.apiKey}`
+
+    const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(body),
       signal: request.signal,
     })
@@ -1047,6 +1057,17 @@ export function createProviderPresets(apiKeys?: Partial<Record<string, string>>)
         { id: 'llama3.1', provider: 'ollama', displayName: 'Llama 3.1', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
         { id: 'mistral', provider: 'ollama', displayName: 'Mistral', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
         { id: 'qwen2.5', provider: 'ollama', displayName: 'Qwen 2.5', contextWindow: 32768, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+      ],
+    },
+    {
+      id: 'ollama_cloud',
+      baseUrl: PROVIDER_BASE_URLS.ollama_cloud,
+      defaultModel: 'llama3.2',
+      models: [
+        { id: 'llama3.2', provider: 'ollama_cloud', displayName: 'Llama 3.2', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+        { id: 'llama3.1', provider: 'ollama_cloud', displayName: 'Llama 3.1', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+        { id: 'mistral', provider: 'ollama_cloud', displayName: 'Mistral', contextWindow: 8192, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
+        { id: 'qwen2.5', provider: 'ollama_cloud', displayName: 'Qwen 2.5', contextWindow: 32768, supportsVision: false, supportsStreaming: true, supportsThinking: false, pricing: { inputPerMillion: 0, outputPerMillion: 0 }, toolCallFormat: 'native' },
       ],
     },
   ]

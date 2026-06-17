@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { GatewayServer, createOpenAICompatRoutes, buildChatResponse, buildStreamChunk } from './index.js'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { GatewayServer, createOpenAICompatRoutes, buildChatResponse, buildStreamChunk, SimpleWebSocketServer } from './index.js'
 import type { GatewayRoute } from './index.js'
 
 // ─── GatewayServer ─────────────────────────────────────────────────
@@ -68,5 +68,73 @@ describe('buildStreamChunk', () => {
     expect(parsed.model).toBe('gpt-4')
     expect(parsed.choices[0]?.delta.content).toBe('Hello')
     expect(parsed.object).toBe('chat.completion.chunk')
+  })
+})
+
+// ─── WebSocket ──────────────────────────────────────────────────────
+
+describe('SimpleWebSocketServer', () => {
+  let gateway: GatewayServer
+  let wss: SimpleWebSocketServer
+
+  beforeEach(() => {
+    gateway = new GatewayServer({ host: '127.0.0.1', port: 0 })
+    wss = new SimpleWebSocketServer(gateway, 0)
+  })
+
+  it('starts and stops without error', async () => {
+    wss.start()
+    expect(wss.getClientCount()).toBe(0)
+    wss.stop()
+  })
+
+  it('broadcast with no clients does not throw', async () => {
+    wss.start()
+    expect(() => wss.broadcast('test', { foo: 1 })).not.toThrow()
+    wss.stop()
+  })
+
+  it('gateway.addWsClient and broadcast work', () => {
+    const sent: string[] = []
+    const client: import('./server.js').WebSocketClient = {
+      id: 'test-1',
+      ready: true,
+      send: (data: string) => { sent.push(data) },
+      close: () => {},
+      onMessage: () => {},
+      onClose: () => {},
+    }
+    gateway.addWsClient('test-1', client)
+    gateway.broadcast('event', { msg: 'hello' })
+    expect(sent).toHaveLength(1)
+    const parsed = JSON.parse(sent[0]!)
+    expect(parsed.type).toBe('event')
+    expect(parsed.payload.msg).toBe('hello')
+  })
+
+  it('does not send to non-ready clients', () => {
+    const sent: string[] = []
+    const client: import('./server.js').WebSocketClient = {
+      id: 'offline',
+      ready: false,
+      send: (data: string) => { sent.push(data) },
+      close: () => {},
+      onMessage: () => {},
+      onClose: () => {},
+    }
+    gateway.addWsClient('offline', client)
+    gateway.broadcast('test', {})
+    expect(sent).toHaveLength(0)
+  })
+
+  it('removeWsClient removes from map', () => {
+    const client: import('./server.js').WebSocketClient = {
+      id: 'gone', ready: true, send: () => {}, close: () => {},
+      onMessage: () => {}, onClose: () => {},
+    }
+    gateway.addWsClient('gone', client)
+    expect(gateway.getWsClient('gone')).toBeDefined()
+    gateway.removeWsClient('gone')
+    expect(gateway.getWsClient('gone')).toBeUndefined()
   })
 })
