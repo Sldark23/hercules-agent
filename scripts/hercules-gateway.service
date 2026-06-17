@@ -1,0 +1,18 @@
+[Unit]
+Description=Hercules Agent Gateway
+Documentation=https://github.com/your-org/hercules-agent
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/hercules-agent/packages/gateway/dist/daemon.js
+WorkingDirectory=/opt/hercules-agent
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/hercules-gateway.log
+StandardError=append:/var/log/hercules-gateway.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+export { MemoryManager } from './manager.js'
+export { SessionStore } from './stores/session-store.js'
+export { VectorStore } from './stores/vector-store.js'
+export { UserProfileStore } from './stores/user-profile-store.js'
+export { SupermemoryClient } from './supermemory/client.js'
+export { createEmbeddingProvider, OpenAIEmbeddingProvider, LocalEmbeddingProvider } from './stores/embeddings.js'
+export type { EmbeddingProvider } from './stores/embeddings.js'
+export type * from './types.js'

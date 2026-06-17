@@ -1,0 +1,28 @@
+{
+  "name": "hercules-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hercules Agent — Self-improving AI agent with multi-platform gateway",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint .",
+    "start": "node bin/hercules.js",
+    "menu": "node bin/hercules.js menu",
+    "shell": "node bin/hercules.js shell",
+    "hercules": "node bin/hercules.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "oxlint": "^0.15.0",
+    "@types/node": "^22.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@10.0.0"
+}

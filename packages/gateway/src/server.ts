@@ -1,0 +1,238 @@
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { randomUUID, createHash } from 'node:crypto'
+
+export interface GatewayConfig {
+  host: string
+  port: number
+  authToken?: string
+  corsOrigins?: string[]
+  maxPayloadSize?: number
+}
+
+export interface GatewayRoute {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
+  path: string
+  handler: (req: IncomingMessage, res: ServerResponse, body?: unknown) => void | Promise<void>
+}
+
+export class GatewayServer {
+  private server: ReturnType<typeof createServer>
+  private routes: GatewayRoute[] = []
+  private wsClients: Map<string, WebSocketClient> = new Map()
+  private config: GatewayConfig
+
+  constructor(config: Partial<GatewayConfig> = {}) {
+    this.config = {
+      host: config.host ?? '0.0.0.0',
+      port: config.port ?? 18789,
+      authToken: config.authToken ?? randomUUID(),
+      corsOrigins: config.corsOrigins ?? ['*'],
+      maxPayloadSize: config.maxPayloadSize ?? 10 * 1024 * 1024,
+    }
+    this.server = createServer((req, res) => this.handleRequest(req, res))
+  }
+
+  route(r: GatewayRoute): void {
+    this.routes.push(r)
+  }
+
+  routeAll(routes: GatewayRoute[]): void {
+    this.routes.push(...routes)
+  }
+
+  addWsClient(id: string, client: WebSocketClient): void {
+    this.wsClients.set(id, client)
+  }
+
+  removeWsClient(id: string): void {
+    this.wsClients.delete(id)
+  }
+
+  getWsClient(id: string): WebSocketClient | undefined {
+    return this.wsClients.get(id)
+  }
+
+  broadcast(type: string, payload: unknown): void {
+    const msg = JSON.stringify({ type, payload, timestamp: new Date().toISOString() })
+    for (const client of this.wsClients.values()) {
+      if (client.ready) client.send(msg)
+    }
+  }
+
+  async start(): Promise<void> {
+    return new Promise((resolve) => {
+      this.server.listen(this.config.port, this.config.host, () => {
+        console.log(`[gateway] Listening on ${this.config.host}:${this.config.port}`)
+        resolve()
+      })
+    })
+  }
+
+  async stop(): Promise<void> {
+    for (const client of this.wsClients.values()) client.close()
+    this.wsClients.clear()
+
+    return new Promise((resolve) => {
+      this.server.close(() => resolve())
+    })
+  }
+
+  getUrl(): string {
+    return `http://${this.config.host}:${this.config.port}`
+  }
+
+  getConfig(): Readonly<GatewayConfig> {
+    return this.config
+  }
+
+  private async handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    this.setCorsHeaders(res)
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204).end()
+      return
+    }
+
+    if (!this.authenticate(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Unauthorized' }))
+      return
+    }
+
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+    const path = url.pathname
+
+    for (const route of this.routes) {
+      if (route.method !== req.method) continue
+      if (!this.matchPath(route.path, path)) continue
+
+      let body: unknown = undefined
+      if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+        body = await this.parseBody(req)
+      }
+
+      try {
+        await route.handler(req, res, body)
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: (err as Error).message }))
+      }
+      return
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: 'Not found' }))
+  }
+
+  private matchPath(pattern: string, path: string): boolean {
+    const patternParts = pattern.split('/')
+    const pathParts = path.split('/')
+    if (patternParts.length !== pathParts.length) return false
+
+    for (let i = 0; i < patternParts.length; i++) {
+      if (patternParts[i]!.startsWith(':')) continue
+      if (patternParts[i] !== pathParts[i]) return false
+    }
+    return true
+  }
+
+  private async parseBody(req: IncomingMessage): Promise<unknown> {
+    const chunks: Buffer[] = []
+    let size = 0
+
+    return new Promise((resolve, reject) => {
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length
+        if (size > (this.config.maxPayloadSize ?? 10_000_000)) {
+          reject(new Error('Payload too large'))
+          req.destroy()
+          return
+        }
+        chunks.push(chunk)
+      })
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString()
+        try { resolve(JSON.parse(raw)) }
+        catch { resolve(raw) }
+      })
+      req.on('error', reject)
+    })
+  }
+
+  private authenticate(req: IncomingMessage): boolean {
+    const token = this.config.authToken
+    if (!token) return true
+
+    const auth = req.headers['authorization']
+    if (!auth) return false
+
+    if (auth.startsWith('Bearer ')) {
+      return auth.slice(7) === token
+    }
+    return auth === token
+  }
+
+  private setCorsHeaders(res: ServerResponse): void {
+    const origins = this.config.corsOrigins
+    if (origins?.includes('*')) {
+      res.setHeader('Access-Control-Allow-Origin', '*')
+    } else if (origins?.length) {
+      res.setHeader('Access-Control-Allow-Origin', origins[0]!)
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+  }
+}
+
+export interface WebSocketClient {
+  id: string
+  ready: boolean
+  send(data: string): void
+  close(): void
+  onMessage(handler: (data: string) => void): void
+  onClose(handler: () => void): void
+}
+
+export class SimpleWebSocketServer {
+  private server: ReturnType<typeof createServer>
+  private clients: Map<string, SimpleWsClient> = new Map()
+  private gateway: GatewayServer
+  private port: number
+
+  constructor(gateway: GatewayServer, port?: number) {
+    this.gateway = gateway
+    this.port = port ?? 18790
+    this.server = createServer()
+  }
+
+  start(): void {
+    this.server.listen(this.port, () => {
+      console.log(`[gateway:ws] WebSocket server on :${this.port}`)
+    })
+  }
+
+  stop(): void {
+    for (const c of this.clients.values()) c.close()
+    this.clients.clear()
+    this.server.close()
+  }
+
+  broadcast(type: string, payload: unknown): void {
+    const msg = JSON.stringify({ type, payload, timestamp: new Date().toISOString() })
+    for (const c of this.clients.values()) c.send(msg)
+  }
+}
+
+class SimpleWsClient {
+  id: string
+  ready = true
+  private onMsg?: (data: string) => void
+  private closeHandler?: () => void
+
+  constructor(id: string) { this.id = id }
+
+  send(_data: string): void {}
+  close(): void { this.ready = false; this.closeHandler?.() }
+  onMessage(handler: (data: string) => void): void { this.onMsg = handler }
+  onClose(handler: () => void): void { this.closeHandler = handler }
+}

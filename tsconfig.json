@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.base.json",
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/cli" },
+    { "path": "./packages/security" },
+    { "path": "./packages/tools" },
+    { "path": "./packages/plugins" },
+    { "path": "./packages/gateway" },
+    { "path": "./packages/channels" },
+    { "path": "./packages/memory" },
+    { "path": "./packages/skills" },
+    { "path": "./packages/scheduler" },
+    { "path": "./packages/swarm" }
+  ]
+}
