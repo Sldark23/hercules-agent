@@ -1,0 +1,49 @@
+# Hermes Workspace Standard .gitignore
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+*.pyc
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.target/
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Cache
+.cache/
+.turbo/
+.parcel-cache/
+
+# Test artifacts
+*.test.ts
+*.spec.ts
+
+# Local config
+*.local.*
+local.config.*
+
+# Archives
+archives/*.tar.gz
+

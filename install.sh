@@ -69,13 +69,17 @@ info "${BOLD}Step 1: Getting project files${NC}"
 
 if [[ -d "$INSTALL_DIR" ]]; then
   info "Existing install found at $INSTALL_DIR"
-  cd "$INSTALL_DIR"
+  cd "$INSTALL_DIR" || { error "Cannot cd to $INSTALL_DIR"; exit 1; }
+  
+  # Clean stale node_modules to avoid corrupted state
+  rm -rf node_modules packages/*/node_modules
+
   if git rev-parse --git-dir >/dev/null 2>&1; then
     info "Pulling latest changes..."
     git pull --rebase 2>/dev/null || warn "Git pull failed"
   else
     warn "Not a git repo. Removing and re-cloning..."
-    rm -rf "$INSTALL_DIR"
+    cd /tmp && rm -rf "$INSTALL_DIR"
     git clone "$REPO" "$INSTALL_DIR"
     cd "$INSTALL_DIR"
   fi
@@ -88,7 +92,7 @@ fi
 # ── Install deps & build ───────────────────────
 echo ""
 info "${BOLD}Step 2: Installing dependencies${NC}"
-pnpm install
+pnpm install --force
 
 info "${BOLD}Step 3: Building packages${NC}"
 pnpm build
