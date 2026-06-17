@@ -25,7 +25,7 @@ node install.js
 
 ```powershell
 # One-liner (PowerShell)
-irm https://hermes-agent.nousresearch.com/install.ps1 | iex
+irm https://raw.githubusercontent.com/Sldark23/hercules-agent/main/install.ps1 | iex
 
 # Or download and run
 powershell -ExecutionPolicy Bypass -File install.ps1
