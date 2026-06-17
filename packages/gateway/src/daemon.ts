@@ -36,8 +36,18 @@ async function main(): Promise<void> {
     port: config.port ?? 3000,
     authToken: config.authToken,
     corsOrigins: config.corsOrigins ?? ['*'],
+    rateLimitMaxRequests: config.rateLimitMaxRequests ?? 100,
+    rateLimitWindow: config.rateLimitWindow ?? 60000,
     ...config,
   })
+
+  server.addHealthCheckRoutes()
+
+  const { createOpenAICompatRoutes } = await import('./openai-http.js')
+  server.routeAll(createOpenAICompatRoutes({
+    chatComplete: async () => ({ id: '', content: '', usage: { input: 0, output: 0, total: 0 }, finish_reason: 'stop', model: '' } as any),
+    chatCompleteStream: async function* () {},
+  }))
 
   const shutdown = async () => {
     console.log('[gateway:daemon] Shutting down...')

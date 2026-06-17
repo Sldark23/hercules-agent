@@ -7,6 +7,7 @@ import { join, dirname } from 'node:path'
 import { homedir, platform } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { execSync, spawn } from 'node:child_process'
+import { createProviderPresets } from '@hercules/core'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const HERCULES_DIR = join(homedir(), '.hercules')
@@ -18,7 +19,28 @@ const BOLD = '\x1b[1m'
 const GREEN = '\x1b[32m'
 const YELLOW = '\x1b[33m'
 const CYAN = '\x1b[36m'
+const MAGENTA = '\x1b[35m'
 const NC = '\x1b[0m'
+
+const PROVIDERS = createProviderPresets()
+
+function showProviderMenu(): void {
+  console.log(`\n${CYAN}╔════════════════════════════════════════════════════════════════════╗${NC}`)
+  console.log(`${CYAN}║                    AVAILABLE LLM PROVIDERS                      ║${NC}`)
+  console.log(`${CYAN}╠════════════════════════════════════════════════════════════════════╗${NC}`)
+
+  PROVIDERS.forEach((p: any, i: number) => {
+    const num = String(i + 1).padStart(2, ' ')
+    const name = p.id.padEnd(15)
+    const model = (p.defaultModel ?? '?').padEnd(30)
+    console.log(`${CYAN}║  ${num}) ${MAGENTA}${name}${NC} ${CYAN}${model}║${NC}`)
+  })
+
+  console.log(`${CYAN}╠════════════════════════════════════════════════════════════════════╣${NC}`)
+  console.log(`${CYAN}║  ${YELLOW}Local:${NC} ollama, local              ${CYAN}                            ║${NC}`)
+  console.log(`${CYAN}║  ${YELLOW}Cloud:${NC} openai, anthropic, google, deepseek, groq, etc   ║${NC}`)
+  console.log(`${CYAN}╚════════════════════════════════════════════════════════════════════╝${NC}\n`)
+}
 
 function ask(rl: Interface, question: string, defaultVal = ''): Promise<string> {
   const def = defaultVal ? ` (${defaultVal})` : ''
@@ -84,16 +106,44 @@ ${BOLD}╔═══════════════════════�
 ╚════════════════════════════════════════╝${NC}
 `)
 
+  showProviderMenu()
+
   // 1. Provider
-  console.log(`\n${CYAN}── LLM Provider ──${NC}`)
-  const provider = (await ask(rl, 'Provider', 'openai')).trim() || 'openai'
-  const model = (await ask(rl, 'Default model', 'gpt-4o')).trim() || 'gpt-4o'
-  const apiKey = (await ask(rl, 'API key (optional, set later)')).trim()
+  console.log(`${CYAN}── LLM Provider ──${NC}`)
+  const providerInput = (await rl.question('Select provider (number or name): ')).trim()
+  let provider: string
+  let model: string
+
+  const providerNum = parseInt(providerInput, 10)
+  if (!isNaN(providerNum) && providerNum > 0 && providerNum <= PROVIDERS.length) {
+    const selected = PROVIDERS[providerNum - 1]!
+    provider = selected.id
+    model = selected.defaultModel ?? 'gpt-4o'
+  } else {
+    provider = providerInput || 'openai'
+    const selected = PROVIDERS.find((p: any) => p.id === provider)
+    model = selected?.defaultModel ?? 'gpt-4o'
+  }
+
+  console.log(`  ${GREEN}Provider: ${provider}${NC}`)
+  const modelInputAnswer = (await rl.question('Default model')).trim() || model || 'gpt-4o'
+  model = modelInputAnswer
+
+  const apiKeyEnv = provider === 'anthropic' ? 'ANTHROPIC_API_KEY' 
+    : provider === 'google' ? 'GOOGLE_API_KEY'
+    : provider === 'ollama' ? 'OLLAMA_BASE_URL'
+    : 'OPENAI_API_KEY'
+  const apiKey = (await rl.question(`API key for ${provider} (optional): `)).trim()
 
   if (apiKey) {
-    process.env[provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'] = apiKey
+    process.env[apiKeyEnv] = apiKey
     const envFile = join(HERCULES_DIR, '.env')
-    await writeFile(envFile, `${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY'}=${apiKey}\n`)
+    let envContent = ''
+    if (existsSync(envFile)) {
+      envContent = await readFile(envFile, 'utf-8')
+    }
+    envContent += `${apiKeyEnv}=${apiKey}\n`
+    await writeFile(envFile, envContent)
     console.log(`  ${GREEN}Saved to ${envFile}${NC}`)
   }
 

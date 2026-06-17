@@ -8,6 +8,13 @@ export interface GatewayConfig {
   authToken?: string
   corsOrigins?: string[]
   maxPayloadSize?: number
+  rateLimitWindow?: number
+  rateLimitMaxRequests?: number
+}
+
+interface RateLimitEntry {
+  count: number
+  resetTime: number
 }
 
 export interface GatewayRoute {
@@ -21,6 +28,8 @@ export class GatewayServer {
   private routes: GatewayRoute[] = []
   private wsClients: Map<string, WebSocketClient> = new Map()
   private config: GatewayConfig
+  private rateLimitMap: Map<string, RateLimitEntry> = new Map()
+  private startTime = Date.now()
 
   constructor(config: Partial<GatewayConfig> = {}) {
     this.config = {
@@ -29,6 +38,8 @@ export class GatewayServer {
       authToken: config.authToken ?? randomUUID(),
       corsOrigins: config.corsOrigins ?? ['*'],
       maxPayloadSize: config.maxPayloadSize ?? 10 * 1024 * 1024,
+      rateLimitWindow: config.rateLimitWindow ?? 60000,
+      rateLimitMaxRequests: config.rateLimitMaxRequests ?? 100,
     }
     this.server = createServer((req, res) => this.handleRequest(req, res))
   }
@@ -39,6 +50,76 @@ export class GatewayServer {
 
   routeAll(routes: GatewayRoute[]): void {
     this.routes.push(...routes)
+  }
+
+  addHealthCheckRoutes(): void {
+    this.routes.push(
+      {
+        method: 'GET',
+        path: '/health',
+        handler: (_req, res) => {
+          const uptime = Math.floor((Date.now() - this.startTime) / 1000)
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            status: 'ok',
+            uptime_seconds: uptime,
+            version: '0.2.3',
+            timestamp: new Date().toISOString(),
+          }))
+        },
+      },
+      {
+        method: 'GET',
+        path: '/ready',
+        handler: (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            ready: true,
+            ws_clients: this.wsClients.size,
+          }))
+        },
+      },
+      {
+        method: 'GET',
+        path: '/v1/models',
+        handler: (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            object: 'list',
+            data: [
+              { id: 'gpt-4o', object: 'model', created: Date.now(), owned_by: 'hercules' },
+              { id: 'claude-sonnet-4-20250514', object: 'model', created: Date.now(), owned_by: 'hercules' },
+              { id: 'llama3.2', object: 'model', created: Date.now(), owned_by: 'hercules' },
+            ],
+          }))
+        },
+      },
+    )
+  }
+
+  addRateLimit(maxRequests?: number, windowMs?: number): void {
+    this.config.rateLimitMaxRequests = maxRequests ?? this.config.rateLimitMaxRequests
+    this.config.rateLimitWindow = windowMs ?? this.config.rateLimitWindow
+  }
+
+  private checkRateLimit(key: string): boolean {
+    const now = Date.now()
+    const entry = this.rateLimitMap.get(key)
+
+    if (!entry || now > entry.resetTime) {
+      this.rateLimitMap.set(key, {
+        count: 1,
+        resetTime: now + (this.config.rateLimitWindow ?? 60000),
+      })
+      return true
+    }
+
+    if (entry.count >= (this.config.rateLimitMaxRequests ?? 100)) {
+      return false
+    }
+
+    entry.count++
+    return true
   }
 
   addWsClient(id: string, client: WebSocketClient): void {
@@ -94,14 +175,26 @@ export class GatewayServer {
       return
     }
 
-    if (!this.authenticate(req)) {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+    const path = url.pathname
+
+    if (!this.authenticate(req) && path !== '/health' && path !== '/ready' && path !== '/v1/models') {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'Unauthorized' }))
       return
     }
 
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
-    const path = url.pathname
+    const clientIp = Array.isArray(req.headers['x-forwarded-for']) 
+      ? req.headers['x-forwarded-for'][0] 
+      : req.headers['x-forwarded-for'] 
+      ?? req.socket?.remoteAddress 
+      ?? 'unknown'
+
+    if (!this.checkRateLimit(clientIp as string)) {
+      res.writeHead(429, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Rate limit exceeded' }))
+      return
+    }
 
     for (const route of this.routes) {
       if (route.method !== req.method) continue

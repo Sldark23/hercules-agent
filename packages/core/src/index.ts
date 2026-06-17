@@ -1,7 +1,7 @@
 export { AgentLoop } from './agent-loop.js'
 export { ContextEngine, estimateTokenCount } from './context-engine.js'
 export { CredentialPool } from './credential-pool.js'
-export { ModelRouter } from './model-router.js'
+export { ModelRouter, createProviderPresets } from './model-router.js'
 export { assembleSystemPrompt } from './system-prompt.js'
 export { SimpleTelemetry, createAgentTelemetry } from './opentelemetry.js'
 export type { TelemetrySpan, TelemetryEvent, TelemetryMetric } from './opentelemetry.js'

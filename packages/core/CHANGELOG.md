@@ -1,5 +1,11 @@
 # @hercules/core
 
+## 0.2.3
+
+### Patch Changes
+
+- feat: setup wizard menu shows all providers, gateway health/rate-limit/endpoints, export createProviderPresets
+
 ## 0.2.2
 
 ### Patch Changes

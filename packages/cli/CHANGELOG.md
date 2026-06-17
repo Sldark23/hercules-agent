@@ -1,5 +1,16 @@
 # @hercules/cli
 
+## 0.2.4
+
+### Patch Changes
+
+- feat: setup wizard menu shows all providers, gateway health/rate-limit/endpoints, export createProviderPresets
+
+- Updated dependencies []:
+  - @hercules/core@0.2.3
+  - @hercules/gateway@0.2.3
+  - @hercules/tools@0.2.3
+
 ## 0.2.3
 
 ### Patch Changes

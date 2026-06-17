@@ -1,5 +1,13 @@
 # @hercules/skills
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies []:
+  - @hercules/core@0.2.3
+  - @hercules/tools@0.2.3
+
 ## 0.2.2
 
 ### Patch Changes
